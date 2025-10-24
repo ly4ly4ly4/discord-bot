@@ -5,7 +5,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events
+  Events,
+  MessageFlags
 } = require('discord.js');
 
 const client = new Client({
@@ -30,7 +31,7 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 const PVB_LINK = process.env.PVB_LINK || '';
 
 client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
+  console.log(`Logged in as ${client.user.tag}`);
 });
 
 // ========== PREFIX COMMAND: !purchase ==========
@@ -92,26 +93,24 @@ client.on('messageCreate', async (message) => {
 
 // ========== SLASH COMMANDS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
-  // LOG every interaction so we can see if it reaches this running bot
-  console.log('[interaction]', {
-    isCommand: interaction.isChatInputCommand(),
-    name: interaction.isChatInputCommand() ? interaction.commandName : null,
-    user: `${interaction.user.tag} (${interaction.user.id})`,
-    guild: interaction.guild ? `${interaction.guild.name} (${interaction.guildId})` : 'DM'
-  });
+  // Log absolutely everything we get so we can debug
+  try {
+    console.log(`[interaction] type=${interaction.type} isChatInput=${interaction.isChatInputCommand?.()} name=${interaction.commandName || 'n/a'} guild=${interaction.guild?.id || 'DM'} user=${interaction.user?.id}`);
+  } catch {}
 
   if (!interaction.isChatInputCommand()) return;
 
   // ---- /ping ----
   if (interaction.commandName === 'ping') {
     console.log('[ping] invoked by', interaction.user.id, interaction.user.tag);
-    return interaction.reply({ content: 'pong', ephemeral: true });
+    // use flags instead of ephemeral
+    return interaction.reply({ content: 'pong', flags: MessageFlags.Ephemeral });
   }
 
   // ---- /completeorder ----
   if (interaction.commandName === 'completeorder') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
     }
 
     const buyer = interaction.options.getUser('buyer');
@@ -133,7 +132,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const proofsChannel = interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID);
     if (!proofsChannel) {
-      return interaction.reply({ content: '⚠️ Could not find the proofs channel.', ephemeral: true });
+      return interaction.reply({ content: '⚠️ Could not find the proofs channel.', flags: MessageFlags.Ephemeral });
     }
 
     const content =
@@ -141,12 +140,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       `## We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}`;
 
     try {
-      await interaction.reply({ content: '✅ Posted your proof in #proofs.', ephemeral: true });
+      await interaction.reply({ content: '✅ Posted your proof in #proofs.', flags: MessageFlags.Ephemeral });
       await proofsChannel.send({ content, embeds: [embed], files: [file] });
     } catch (err) {
       console.error('Error sending proof message:', err);
       if (!interaction.replied) {
-        await interaction.reply({ content: '⚠️ Failed to post in #proofs (check bot permissions and file size).', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Failed to post in #proofs (check bot permissions and file size).', flags: MessageFlags.Ephemeral });
       }
     }
     return;
@@ -161,12 +160,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         console.log('[pvbserver] blocked: not allowed');
         return interaction.reply({
           content: '❌ You do not have permission to use this command.',
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
 
       // Defer immediately to avoid the 3s timeout
-      await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply(); // not ephemeral
 
       if (!PVB_LINK) {
         console.log('[pvbserver] missing PVB_LINK env var');
@@ -193,7 +192,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.deferred && !interaction.replied) {
         await interaction.editReply('⚠️ Something went wrong while sending the link.');
       } else if (!interaction.replied) {
-        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', flags: MessageFlags.Ephemeral });
       }
     }
   }
