@@ -140,35 +140,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ---- /pvbserver ----
   if (interaction.commandName === 'pvbserver') {
-    // permission check
-    if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({
-        content: '❌ You do not have permission to use this command.',
-        ephemeral: true
-      });
+    try {
+      console.log('[pvbserver] invoked by', interaction.user.id, interaction.user.tag);
+
+      // permission check
+      if (!ALLOWED_USERS.includes(interaction.user.id)) {
+        console.log('[pvbserver] blocked: not allowed');
+        return interaction.reply({
+          content: '❌ You do not have permission to use this command.',
+          ephemeral: true
+        });
+      }
+
+      // Defer first so we never time out
+      await interaction.deferReply({ ephemeral: false });
+
+      if (!PVB_LINK) {
+        console.log('[pvbserver] missing PVB_LINK env var');
+        return interaction.editReply('⚠️ The private server link is not set yet. Ask an admin to set the `PVB_LINK` variable in Railway.');
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x00a2ff)
+        .setTitle('Roblox Private Server')
+        .setDescription(`Here’s the private server link:\n${PVB_LINK}`)
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel('Join Private Server')
+          .setStyle(ButtonStyle.Link)
+          .setURL(PVB_LINK)
+      );
+
+      await interaction.editReply({ embeds: [embed], components: [row] });
+      console.log('[pvbserver] reply sent');
+    } catch (err) {
+      console.error('[pvbserver] error', err);
+      if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply('⚠️ Something went wrong while sending the link.');
+      } else if (!interaction.replied) {
+        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', ephemeral: true });
+      }
     }
-
-    if (!PVB_LINK) {
-      return interaction.reply({
-        content: '⚠️ The private server link is not set yet. Ask an admin to set the `PVB_LINK` variable in Railway.',
-        ephemeral: true
-      });
-    }
-
-    const embed = new EmbedBuilder()
-      .setColor(0x00a2ff)
-      .setTitle('Roblox Private Server')
-      .setDescription(`Here’s the private server link:\n${PVB_LINK}`)
-      .setTimestamp();
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('Join Private Server')
-        .setStyle(ButtonStyle.Link)
-        .setURL(PVB_LINK)
-    );
-
-    return interaction.reply({ embeds: [embed], components: [row] });
   }
 });
 
