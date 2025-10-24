@@ -1,7 +1,7 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 // MUST match the app/bot that is online
-const token   = process.env.BOT_TOKEN;            // same token your running bot uses
+const token    = process.env.BOT_TOKEN;           // same token your running bot uses
 const clientId = '1421187460083486971';           // Application (bot) ID
 const guildId  = '1406101210984874095';           // Your server ID
 
@@ -19,6 +19,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName('pvbserver')
     .setDescription('Get the Roblox private server link'),
+
+  // NEW: gagserver
+  new SlashCommandBuilder()
+    .setName('gagserver')
+    .setDescription('Get the GAG private server link'),
 
   new SlashCommandBuilder()
     .setName('ping')

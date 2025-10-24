@@ -17,7 +17,7 @@ const client = new Client({
   ]
 });
 
-// Only these users can run !purchase or /completeorder or /pvbserver
+// Only these users can run !purchase or /completeorder or /pvbserver or /gagserver
 const ALLOWED_USERS = ['1116953633364398101', '456358634868441088'];
 
 // ID of your proofs channel
@@ -27,17 +27,16 @@ const PROOFS_CHANNEL_ID = '1406121226367275008';
 const EMOJI_THANKYOU = '<:heartssss:1410132419524169889>';
 const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 
-// Roblox private server link (Railway → Variables)
+// Roblox private server links (Railway → Variables)
 const PVB_LINK = process.env.PVB_LINK || '';
+const GAG_LINK = process.env.GAG_LINK || '';   // <<< NEW
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Show what Railway says we deployed
   console.log('RAILWAY_GIT_COMMIT_SHA:', process.env.RAILWAY_GIT_COMMIT_SHA || '(none)');
   console.log('RAILWAY_GIT_BRANCH:', process.env.RAILWAY_GIT_BRANCH || '(none)');
 
-  // Fetch and log all registered commands the bot can see at runtime
   try {
     const cmds = await client.application.commands.fetch();
     console.log('Loaded application commands:', [...cmds.values()].map(c => c.name).join(', ') || '(none)');
@@ -105,7 +104,6 @@ client.on('messageCreate', async (message) => {
 
 // ========== SLASH COMMANDS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
-  // Log every interaction so we know it reached the bot
   try {
     console.log(`[interaction] isChatInput=${interaction.isChatInputCommand?.()} name=${interaction.commandName || 'n/a'} user=${interaction.user?.id || 'n/a'} guild=${interaction.guildId || 'DM'}`);
   } catch {}
@@ -175,8 +173,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // Defer immediately to avoid the 3s timeout
-      await interaction.deferReply(); // public
+      await interaction.deferReply(); // public response later
 
       if (!PVB_LINK) {
         console.log('[pvbserver] missing PVB_LINK env var');
@@ -186,7 +183,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const embed = new EmbedBuilder()
         .setColor(0x00a2ff)
         .setTitle('Roblox Private Server')
-        .setDescription(`Here’s the private server link:\n${PVB_LINK}`)
+        .setDescription(`Here’s the private server link, please state your username before joining:\n${PVB_LINK}`)
         .setTimestamp();
 
       const row = new ActionRowBuilder().addComponents(
@@ -206,6 +203,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', flags: MessageFlags.Ephemeral });
       }
     }
+    return;
+  }
+
+  // ---- /gagserver (NEW) ----
+  if (interaction.commandName === 'gagserver') {
+    try {
+      console.log('[gagserver] invoked by', interaction.user.id, interaction.user.tag);
+
+      if (!ALLOWED_USERS.includes(interaction.user.id)) {
+        console.log('[gagserver] blocked: not allowed');
+        return interaction.reply({
+          content: '❌ You do not have permission to use this command.',
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      await interaction.deferReply(); // public
+
+      if (!GAG_LINK) {
+        console.log('[gagserver] missing GAG_LINK env var');
+        return interaction.editReply('⚠️ The GAG private server link is not set yet. Ask an admin to set the `GAG_LINK` variable in Railway.');
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x00c853)
+        .setTitle('GAG Private Server')
+        .setDescription(`Here’s the GAG private server link, please state your username before joining:\n${GAG_LINK}`)
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel('Join GAG Private Server')
+          .setStyle(ButtonStyle.Link)
+          .setURL(GAG_LINK)
+      );
+
+      await interaction.editReply({ embeds: [embed], components: [row] });
+      console.log('[gagserver] reply sent');
+    } catch (err) {
+      console.error('[gagserver] error', err);
+      if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply('⚠️ Something went wrong while sending the link.');
+      } else if (!interaction.replied) {
+        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', flags: MessageFlags.Ephemeral });
+      }
+    }
+    return;
   }
 });
 
@@ -215,6 +259,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 process.on('unhandledRejection', (err) => {
   console.error('[global] Unhandled Rejection:', err);
 });
+
 process.on('uncaughtException', (err) => {
   console.error('[global] Uncaught Exception:', err);
 });
