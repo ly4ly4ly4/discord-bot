@@ -30,8 +30,20 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 // Roblox private server link (Railway → Variables)
 const PVB_LINK = process.env.PVB_LINK || '';
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+
+  // Show what Railway says we deployed
+  console.log('RAILWAY_GIT_COMMIT_SHA:', process.env.RAILWAY_GIT_COMMIT_SHA || '(none)');
+  console.log('RAILWAY_GIT_BRANCH:', process.env.RAILWAY_GIT_BRANCH || '(none)');
+
+  // Fetch and log all registered commands the bot can see at runtime
+  try {
+    const cmds = await client.application.commands.fetch();
+    console.log('Loaded application commands:', [...cmds.values()].map(c => c.name).join(', ') || '(none)');
+  } catch (e) {
+    console.log('Could not fetch application commands at ready:', e?.message || e);
+  }
 });
 
 // ========== PREFIX COMMAND: !purchase ==========
@@ -93,9 +105,9 @@ client.on('messageCreate', async (message) => {
 
 // ========== SLASH COMMANDS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
-  // Log absolutely everything we get so we can debug
+  // Log every interaction so we know it reached the bot
   try {
-    console.log(`[interaction] type=${interaction.type} isChatInput=${interaction.isChatInputCommand?.()} name=${interaction.commandName || 'n/a'} guild=${interaction.guild?.id || 'DM'} user=${interaction.user?.id}`);
+    console.log(`[interaction] isChatInput=${interaction.isChatInputCommand?.()} name=${interaction.commandName || 'n/a'} user=${interaction.user?.id || 'n/a'} guild=${interaction.guildId || 'DM'}`);
   } catch {}
 
   if (!interaction.isChatInputCommand()) return;
@@ -103,7 +115,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ---- /ping ----
   if (interaction.commandName === 'ping') {
     console.log('[ping] invoked by', interaction.user.id, interaction.user.tag);
-    // use flags instead of ephemeral
     return interaction.reply({ content: 'pong', flags: MessageFlags.Ephemeral });
   }
 
@@ -165,7 +176,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // Defer immediately to avoid the 3s timeout
-      await interaction.deferReply(); // not ephemeral
+      await interaction.deferReply(); // public
 
       if (!PVB_LINK) {
         console.log('[pvbserver] missing PVB_LINK env var');
