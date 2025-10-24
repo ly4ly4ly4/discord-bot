@@ -182,8 +182,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const embed = new EmbedBuilder()
         .setColor(0x00a2ff)
-        .setTitle('Roblox Private Server')
-        .setDescription(`Here’s the private server link, please state your username before joining:\n${PVB_LINK}`)
+        .setTitle('PVB Private Server')
+        .setDescription(`Here’s the PVB private server link, please state your username before joining:\n${PVB_LINK}`)
         .setTimestamp();
 
       const row = new ActionRowBuilder().addComponents(
