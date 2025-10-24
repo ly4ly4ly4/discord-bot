@@ -186,5 +186,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+
 // ===== KEEP THIS AT THE VERY BOTTOM =====
-client.login(process.env.BOT_TOKEN);
+
+// Global error handlers so crashes show in logs
+process.on('unhandledRejection', (err) => {
+  console.error('[global] Unhandled Rejection:', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[global] Uncaught Exception:', err);
+});
+client.on('error', (err) => console.error('[client] error:', err));
+client.on('shardError', (err) => console.error('[client] shardError:', err));
+
+const TOKEN = process.env.BOT_TOKEN;
+
+if (!TOKEN || TOKEN.trim().length === 0) {
+  console.error('❌ Missing BOT_TOKEN environment variable. Set it in Railway → Variables (or Shared Variables linked to this service).');
+} else {
+  console.log('BOT_TOKEN detected. Attempting login…');
+}
+
+client.login(TOKEN)
+  .then(() => console.log('Login promise resolved.'))
+  .catch((err) => {
+    console.error('❌ Login failed:', err);
+    // keep container alive briefly so you can read the error in logs
+    setTimeout(() => process.exit(1), 15000);
+  });
