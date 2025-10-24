@@ -30,7 +30,7 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 const PVB_LINK = process.env.PVB_LINK || '';
 
 client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag} (id: ${client.user.id})`);
 });
 
 // ========== PREFIX COMMAND: !purchase ==========
@@ -92,6 +92,14 @@ client.on('messageCreate', async (message) => {
 
 // ========== SLASH COMMANDS ==========
 client.on(Events.InteractionCreate, async (interaction) => {
+  // LOG every interaction so we can see if it reaches this running bot
+  console.log('[interaction]', {
+    isCommand: interaction.isChatInputCommand(),
+    name: interaction.isChatInputCommand() ? interaction.commandName : null,
+    user: `${interaction.user.tag} (${interaction.user.id})`,
+    guild: interaction.guild ? `${interaction.guild.name} (${interaction.guildId})` : 'DM'
+  });
+
   if (!interaction.isChatInputCommand()) return;
 
   // ---- /ping ----
@@ -190,7 +198,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 });
-
 
 // ===== KEEP THIS AT THE VERY BOTTOM =====
 

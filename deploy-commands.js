@@ -1,8 +1,8 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 // MUST match the app/bot that is online
-const token   = process.env.BOT_TOKEN;            // same token your running bot uses
-const clientId = '1421187460083486971';           // Application (bot) ID
+const token    = process.env.BOT_TOKEN;           // same token your running bot uses
+const clientId = '1421187460083486971';           // Application (bot) ID (must equal client.user.id printed in logs)
 const guildId  = '1406101210984874095';           // Your server ID
 
 const commands = [
@@ -32,12 +32,13 @@ const rest = new REST({ version: '10' }).setToken(token);
 
 (async () => {
   try {
-    console.log('Registering slash commands…');
-    await rest.put(
-      Routes.applicationGuildCommands(clientId, guildId),
-      { body: commands }
-    );
-    console.log('Slash commands registered ✅');
+    console.log('Clearing existing guild commands…');
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: [] });
+    console.log('Cleared ✅');
+
+    console.log('Registering fresh commands…');
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    console.log('Registered ✅');
   } catch (err) {
     console.error('Register error:', err);
   }
