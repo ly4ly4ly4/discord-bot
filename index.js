@@ -1,6 +1,6 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
+const {
+  Client,
+  GatewayIntentBits,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -26,7 +26,7 @@ const PROOFS_CHANNEL_ID = '1406121226367275008';
 const EMOJI_THANKYOU = '<:heartssss:1410132419524169889>';
 const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 
-// Roblox private server link (set this in Railway → Variables)
+// Roblox private server link (Railway → Variables)
 const PVB_LINK = process.env.PVB_LINK || '';
 
 client.once('ready', () => {
@@ -94,6 +94,12 @@ client.on('messageCreate', async (message) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  // ---- /ping ----
+  if (interaction.commandName === 'ping') {
+    console.log('[ping] invoked by', interaction.user.id, interaction.user.tag);
+    return interaction.reply({ content: 'pong', ephemeral: true });
+  }
+
   // ---- /completeorder ----
   if (interaction.commandName === 'completeorder') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
@@ -143,7 +149,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       console.log('[pvbserver] invoked by', interaction.user.id, interaction.user.tag);
 
-      // permission check
       if (!ALLOWED_USERS.includes(interaction.user.id)) {
         console.log('[pvbserver] blocked: not allowed');
         return interaction.reply({
@@ -152,7 +157,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // Defer first so we never time out
+      // Defer immediately to avoid the 3s timeout
       await interaction.deferReply({ ephemeral: false });
 
       if (!PVB_LINK) {
@@ -189,7 +194,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ===== KEEP THIS AT THE VERY BOTTOM =====
 
-// Global error handlers so crashes show in logs
+// Global error handlers
 process.on('unhandledRejection', (err) => {
   console.error('[global] Unhandled Rejection:', err);
 });
@@ -202,7 +207,7 @@ client.on('shardError', (err) => console.error('[client] shardError:', err));
 const TOKEN = process.env.BOT_TOKEN;
 
 if (!TOKEN || TOKEN.trim().length === 0) {
-  console.error('❌ Missing BOT_TOKEN environment variable. Set it in Railway → Variables (or Shared Variables linked to this service).');
+  console.error('❌ Missing BOT_TOKEN env var. Set it in Railway → Variables (or Shared Variables linked to this service).');
 } else {
   console.log('BOT_TOKEN detected. Attempting login…');
 }
@@ -211,6 +216,5 @@ client.login(TOKEN)
   .then(() => console.log('Login promise resolved.'))
   .catch((err) => {
     console.error('❌ Login failed:', err);
-    // keep container alive briefly so you can read the error in logs
     setTimeout(() => process.exit(1), 15000);
   });

@@ -1,27 +1,31 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
-// ↓↓↓ Fill these with YOUR values ↓↓↓
-const token = process.env.BOT_TOKEN;              // set in your terminal when running locally
-const clientId = '1421187460083486971';           // Application ID (Dev Portal → General Information)
-const guildId = '1406101210984874095';            // Your Server (Guild) ID
-// ↑↑↑ Fill these with YOUR values ↑↑↑
+// MUST match the app/bot that is online
+const token   = process.env.BOT_TOKEN;            // same token your running bot uses
+const clientId = '1421187460083486971';           // Application (bot) ID
+const guildId  = '1406101210984874095';           // Your server ID
 
 const commands = [
-  // /completeorder (existing)
+  // /completeorder
   new SlashCommandBuilder()
     .setName('completeorder')
     .setDescription('Post a completed order to the proofs channel')
-    .addUserOption(opt =>
-      opt.setName('buyer').setDescription('Buyer').setRequired(true))
-    .addStringOption(opt =>
-      opt.setName('item').setDescription('Item purchased').setRequired(true))
-    .addAttachmentOption(opt =>
-      opt.setName('proof').setDescription('Proof screenshot').setRequired(true)),
+    .addUserOption(o =>
+      o.setName('buyer').setDescription('Buyer').setRequired(true))
+    .addStringOption(o =>
+      o.setName('item').setDescription('Item purchased').setRequired(true))
+    .addAttachmentOption(o =>
+      o.setName('proof').setDescription('Proof screenshot').setRequired(true)),
 
-  // /pvbserver (new)
+  // /pvbserver
   new SlashCommandBuilder()
     .setName('pvbserver')
-    .setDescription('Get the Roblox private server link')
+    .setDescription('Get the Roblox private server link'),
+
+  // /ping - quick health check
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Replies with pong'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);
@@ -35,6 +39,6 @@ const rest = new REST({ version: '10' }).setToken(token);
     );
     console.log('Slash commands registered ✅');
   } catch (err) {
-    console.error(err);
+    console.error('Register error:', err);
   }
 })();
