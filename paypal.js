@@ -1,8 +1,8 @@
-// paypal.js — updated for reliable channel tracking via invoice_number
+// paypal.js — fully updated for reliability and fallback safety
 // - Embeds channelId + timestamp into invoice_number for webhook recovery
-// - Keeps all previous behavior (OAuth, retries, payer link fallback)
+// - Adds a fallback to re-fetch last invoice if PayPal fails to return id
+// - Keeps retries, payer link fallback, and full sandbox/live compatibility
 // - Always USD
-// - Works with both sandbox and live
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -102,6 +102,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       invoice = JSON.parse(bodyText);
     } catch {}
   }
+
   if (!invoice?.id) {
     const loc =
       createRes.headers.get('location') || createRes.headers.get('Location');
@@ -111,6 +112,24 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       if (maybeId) invoice = { id: maybeId };
     }
   }
+
+  // 🩹 New fallback: re-fetch latest invoice if PayPal gave no ID
+  if (!invoice?.id) {
+    console.warn('[paypal] create returned no ID; fetching last invoice as fallback...');
+    const listRes = await fetch(`${BASE}/v2/invoicing/invoices?page_size=1&total_required=false`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const listData = await listRes.json().catch(() => ({}));
+    const latest =
+      Array.isArray(listData.items) && listData.items.length > 0
+        ? listData.items[0]
+        : null;
+    if (latest?.id) {
+      console.log('[paypal] recovered invoice id from list:', latest.id);
+      invoice = latest;
+    }
+  }
+
   if (!invoice?.id) throw new Error('Create invoice returned no id');
 
   console.log('[paypal] created invoice id:', invoice.id);
