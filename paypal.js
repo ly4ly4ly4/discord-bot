@@ -1,4 +1,4 @@
-// paypal.js — Node's built-in fetch, plus small retry on /send
+// paypal.js — Node's built-in fetch, ask for full body, fallback to Location, retry /send
 
 const BASE = process.env.PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
@@ -6,7 +6,7 @@ const BASE = process.env.PAYPAL_MODE === 'live'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Get an OAuth token from PayPal
+// 1) OAuth
 async function getAccessToken() {
   const res = await fetch(`${BASE}/v1/oauth2/token`, {
     method: 'POST',
@@ -26,16 +26,17 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-// Create an invoice (USD only), send to invoicer, return a shareable payer link
+// 2) Create + send invoice, return payer link
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
-  // 1) Create invoice (no primary_recipients)
+  // Create invoice. Ask PayPal to return the full representation.
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
     },
     body: JSON.stringify({
       detail: {
@@ -57,24 +58,38 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     })
   });
 
-  if (!createRes.ok) {
-    const text = await createRes.text().catch(() => '?');
-    throw new Error('Create invoice failed: ' + text);
+  // If body is empty but we got a 201, PayPal may have put the id in the Location header.
+  let invoice = null;
+  let bodyText = await createRes.text().catch(() => '');
+  if (bodyText && bodyText.trim().length > 0) {
+    try { invoice = JSON.parse(bodyText); } catch { /* ignore */ }
+  }
+  if (!invoice?.id) {
+    // Try Location header: .../v2/invoicing/invoices/INVOICE_ID
+    const loc = createRes.headers.get('location') || createRes.headers.get('Location');
+    if (loc) {
+      const parts = loc.split('/');
+      const maybeId = parts[parts.length - 1];
+      if (maybeId) invoice = { id: maybeId };
+    }
+  }
+  if (!invoice?.id) {
+    throw new Error('Create invoice returned no id');
   }
 
-  const invoice = await createRes.json();
-  if (!invoice?.id) throw new Error('Create invoice returned no id');
   console.log('[paypal] created invoice id:', invoice.id);
 
-  // (Optional) read it back to confirm visibility and status
-  await sleep(300); // tiny delay helps with occasional propagation lag
+  // Small delay helps with propagation
+  await sleep(300);
+
+  // Optional: read status before send
   let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
   const before = await getRes.json().catch(() => ({}));
   console.log('[paypal] invoice status before send:', before?.status);
 
-  // 2) Try to send (retry once on 404/RESOURCE_NOT_FOUND)
+  // Send (retry once on 404)
   async function trySend() {
     const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
       method: 'POST',
@@ -90,17 +105,17 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
 
   let send = await trySend();
   if (!send.ok && send.status === 404) {
-    console.warn('[paypal] send returned 404. Retrying once…', send.body);
+    console.warn('[paypal] send returned 404, retrying once…', send.body);
     await sleep(600);
     send = await trySend();
   }
   if (!send.ok) throw new Error('Send invoice failed: ' + send.body);
 
-  // 3) Fetch again to get the payer link
+  // Fetch again to get the payer link
   getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
-  const full = await getRes.json();
+  const full = await getRes.json().catch(() => ({}));
   const payLink = (full?.links || []).find(l => l.rel === 'pay')?.href || full?.href || null;
 
   if (!payLink) throw new Error('Could not find payer link on invoice after send');
@@ -108,7 +123,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   return { id: invoice.id, payLink };
 }
 
-// Verify the webhook signature from PayPal
+// 3) Webhook verification
 async function verifyWebhookSignature(req) {
   const token = await getAccessToken();
   const verifyRes = await fetch(`${BASE}/v1/notifications/verify-webhook-signature`, {
