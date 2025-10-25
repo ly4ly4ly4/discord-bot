@@ -209,7 +209,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       const reference = JSON.stringify({
         guildId: interaction.guildId,
-        channelId: interaction.channelId,
+        channelId: interaction.channelId,   // <— ticket/original channel
         invokerId: interaction.user.id
       });
 
@@ -242,6 +242,7 @@ app.use(express.json({ type: '*/*' })); // accept JSON
 // optional health
 app.get('/', (_req, res) => res.send('OK'));
 
+// ==== UPDATED: post in original ticket + fallback channel ====
 app.post('/paypal/webhook', async (req, res) => {
   try {
     const ev = req.body;
@@ -256,41 +257,56 @@ app.post('/paypal/webhook', async (req, res) => {
     if (!ok) return;
 
     if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
-      const invoiceId = ev?.resource?.id || ev?.resource?.invoice_id || '(unknown)';
+      // Try to pull invoice id and amount from payload
+      const invoiceId =
+        ev?.resource?.id ||
+        ev?.resource?.invoice_id ||
+        ev?.resource?.detail?.invoice_number ||
+        '(unknown)';
 
-      // reference may be present or absent; log raw
+      const amount =
+        ev?.resource?.amount?.value && ev?.resource?.amount?.currency_code
+          ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
+          : null;
+
+      // reference we stored when creating the invoice
       const refRaw =
         ev?.resource?.detail?.reference ??
         ev?.resource?.detail?.invoice_number ??
         null;
       console.log('[webhook] refRaw:', refRaw);
 
-      // parse reference if it was JSON we set earlier
       let parsed = {};
       try { parsed = JSON.parse(refRaw); } catch {}
 
-      // choose a channel: reference → env override → proofs
-      const FALLBACK = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID;
-      const channelId = parsed?.channelId || FALLBACK;
-      console.log('[webhook] using channelId:', channelId);
+      // Post in original channel (from reference) AND fallback channel
+      const primaryChannelId = parsed?.channelId || null;
+      const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
 
-      if (!channelId) {
-        console.log('[webhook] no channel id available; set PAID_CHANNEL_ID env var to force a target channel');
+      const notifyIds = [...new Set([primaryChannelId, fallbackChannelId].filter(Boolean))];
+      console.log('[webhook] notifying channels:', notifyIds);
+
+      if (notifyIds.length === 0) {
+        console.log('[webhook] no channels available; set PAID_CHANNEL_ID or PROOFS_CHANNEL_ID');
         return;
       }
 
-      let channel = null;
-      try {
-        channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId);
-      } catch (e) {
-        console.log('[webhook] fetch channel error:', e?.message || e);
-      }
+      const msg = amount
+        ? `✅ **Paid** — Invoice \`${invoiceId}\` has been paid (**${amount}**).`
+        : `✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`;
 
-      if (channel) {
-        await channel.send(`✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`);
-        console.log('[webhook] posted confirmation in Discord');
-      } else {
-        console.log('[webhook] could not find channel id', channelId);
+      for (const id of notifyIds) {
+        try {
+          const ch = client.channels.cache.get(id) || await client.channels.fetch(id);
+          if (ch) {
+            await ch.send(msg);
+            console.log('[webhook] posted confirmation in channel', id);
+          } else {
+            console.log('[webhook] channel not found', id);
+          }
+        } catch (e) {
+          console.log('[webhook] send error for channel', id, e?.message || e);
+        }
       }
     }
   } catch (err) {
