@@ -1,5 +1,4 @@
-// paypal.js (CommonJS)
-const fetch = require('node-fetch');
+// paypal.js — use Node's built-in fetch (no node-fetch import)
 
 const BASE = process.env.PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
@@ -18,7 +17,7 @@ async function getAccessToken() {
     body: 'grant_type=client_credentials'
   });
   if (!res.ok) {
-    const text = await res.text().catch(()=>'?');
+    const text = await res.text().catch(() => '?');
     throw new Error('PayPal OAuth failed: ' + text);
   }
   const data = await res.json();
@@ -32,12 +31,15 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   // 1) Create invoice (no primary_recipients)
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
     body: JSON.stringify({
       detail: {
-        currency_code: 'USD',                 // Always USD
+        currency_code: 'USD',
         invoice_number: `INV-${Date.now()}`,
-        reference,                            // JSON string containing Discord channelId, etc.
+        reference,
         note: itemName,
         terms_and_conditions: "Digital goods. No shipping."
       },
@@ -53,7 +55,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     })
   });
   if (!createRes.ok) {
-    const text = await createRes.text().catch(()=>'?');
+    const text = await createRes.text().catch(() => '?');
     throw new Error('Create invoice failed: ' + text);
   }
   const invoice = await createRes.json();
@@ -61,15 +63,18 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   // 2) Generate the payer page (and email invoicer)
   const sendRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
     body: JSON.stringify({ send_to_invoicer: true })
   });
   if (!sendRes.ok) {
-    const text = await sendRes.text().catch(()=>'?');
+    const text = await sendRes.text().catch(() => '?');
     throw new Error('Send invoice failed: ' + text);
   }
 
-  // 3) Fetch invoice to extract the payer link
+  // 3) Fetch the invoice to get the payer link
   const getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
@@ -91,11 +96,11 @@ async function verifyWebhookSignature(req) {
       cert_url: req.headers['paypal-cert-url'],
       auth_algo: req.headers['paypal-auth-algo'],
       transmission_sig: req.headers['paypal-transmission-sig'],
-      webhook_id: process.env.WEBHOOK_ID || '', // Fill after creating webhook
+      webhook_id: process.env.WEBHOOK_ID || '',
       webhook_event: req.body
     })
   });
-  const verify = await verifyRes.json().catch(()=>({}));
+  const verify = await verifyRes.json().catch(() => ({}));
   return verify?.verification_status === 'SUCCESS';
 }
 
