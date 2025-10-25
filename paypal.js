@@ -1,4 +1,4 @@
-// paypal.js — Node's built-in fetch, ask for full body, fallback to Location, retry /send
+// paypal.js — Node's built-in fetch, placeholder recipient, ask for full body, retry /send
 
 const BASE = process.env.PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
@@ -30,6 +30,12 @@ async function getAccessToken() {
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
+  // ---- IMPORTANT: provide a placeholder recipient email so PayPal will "send" the invoice
+  const recipientEmail =
+    process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
+    process.env.SELLER_EMAIL ||               // fallback if you set this
+    'placeholder@example.com';                // last-resort format-only fallback
+
   // Create invoice. Ask PayPal to return the full representation.
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
     method: 'POST',
@@ -50,6 +56,10 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
         name: { given_name: process.env.INVOICE_BRAND_NAME || "Your", surname: "Shop" },
         email_address: process.env.SELLER_EMAIL || undefined
       },
+      // >>> This satisfies PayPal's "must have a recipient" rule
+      primary_recipients: [{
+        billing_info: { email_address: recipientEmail }
+      }],
       items: [{
         name: itemName,
         quantity: "1",
@@ -58,14 +68,13 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     })
   });
 
-  // If body is empty but we got a 201, PayPal may have put the id in the Location header.
+  // Handle empty body: fall back to Location header
   let invoice = null;
   let bodyText = await createRes.text().catch(() => '');
   if (bodyText && bodyText.trim().length > 0) {
     try { invoice = JSON.parse(bodyText); } catch { /* ignore */ }
   }
   if (!invoice?.id) {
-    // Try Location header: .../v2/invoicing/invoices/INVOICE_ID
     const loc = createRes.headers.get('location') || createRes.headers.get('Location');
     if (loc) {
       const parts = loc.split('/');
@@ -76,11 +85,9 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   if (!invoice?.id) {
     throw new Error('Create invoice returned no id');
   }
-
   console.log('[paypal] created invoice id:', invoice.id);
 
-  // Small delay helps with propagation
-  await sleep(300);
+  await sleep(300); // small propagation delay
 
   // Optional: read status before send
   let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
