@@ -20,7 +20,6 @@ const commands = [
     .setName('pvbserver')
     .setDescription('Get the Roblox private server link'),
 
-  // NEW: gagserver
   new SlashCommandBuilder()
     .setName('gagserver')
     .setDescription('Get the GAG private server link'),
@@ -28,6 +27,19 @@ const commands = [
   new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Replies with pong'),
+
+  // NEW: /invoice "item" "howmuch" (USD only)
+  new SlashCommandBuilder()
+    .setName('invoice')
+    .setDescription('Create a PayPal invoice link (USD only)')
+    .addStringOption(o =>
+      o.setName('item')
+       .setDescription('Item name (e.g., Game Pass X)')
+       .setRequired(true))
+    .addNumberOption(o =>
+      o.setName('howmuch')
+       .setDescription('Amount in USD (e.g., 5)')
+       .setRequired(true)),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);

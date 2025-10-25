@@ -9,6 +9,9 @@ const {
   MessageFlags
 } = require('discord.js');
 
+const express = require('express'); // NEW
+const { createAndShareInvoice, verifyWebhookSignature } = require('./paypal'); // NEW
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -17,7 +20,7 @@ const client = new Client({
   ]
 });
 
-// Only these users can run !purchase or /completeorder or /pvbserver or /gagserver
+// Only these users can run !purchase or /completeorder or /pvbserver or /gagserver (and /invoice)
 const ALLOWED_USERS = ['1116953633364398101', '456358634868441088'];
 
 // ID of your proofs channel
@@ -29,7 +32,7 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 
 // Roblox private server links (Railway → Variables)
 const PVB_LINK = process.env.PVB_LINK || '';
-const GAG_LINK = process.env.GAG_LINK || '';   // <<< NEW
+const GAG_LINK = process.env.GAG_LINK || '';
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -206,7 +209,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ---- /gagserver (NEW) ----
+  // ---- /gagserver ----
   if (interaction.commandName === 'gagserver') {
     try {
       console.log('[gagserver] invoked by', interaction.user.id, interaction.user.tag);
@@ -251,7 +254,87 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     return;
   }
+
+  // ---- /invoice (USD only) ----
+  if (interaction.commandName === 'invoice') {
+    if (!ALLOWED_USERS.includes(interaction.user.id)) {
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+    }
+
+    await interaction.deferReply(); // public in staff/ticket channel
+
+    const itemName = interaction.options.getString('item');
+    const howmuch  = interaction.options.getNumber('howmuch');
+
+    if (howmuch <= 0) {
+      return interaction.editReply('⚠️ Amount must be greater than 0.');
+    }
+
+    const amountUSD = howmuch.toFixed(2);
+
+    try {
+      const reference = JSON.stringify({
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        invokerId: interaction.user.id
+      });
+
+      const { id, payLink } = await createAndShareInvoice({
+        itemName,
+        amountUSD, // Always USD
+        reference
+      });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
+      );
+
+      await interaction.editReply({
+        content: `Invoice **${id}** for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
+        components: [row]
+      });
+    } catch (e) {
+      console.error('[invoice] error:', e);
+      await interaction.editReply('⚠️ Could not create/send the invoice. Check PayPal env vars & Railway logs.');
+    }
+    return;
+  }
 });
+
+// ===== PayPal Webhook HTTP server (runs inside the same bot process) =====
+const app = express();
+app.use(express.json({ type: '*/*' })); // accept JSON from PayPal
+
+app.post('/paypal/webhook', async (req, res) => {
+  try {
+    const ok = await verifyWebhookSignature(req);
+    if (!ok) {
+      console.warn('[webhook] verification failed');
+      return res.status(400).end();
+    }
+
+    const ev = req.body;
+    if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
+      const invoiceId = ev?.resource?.id;
+      const ref = ev?.resource?.detail?.reference;
+      let channelId = null;
+      try { channelId = JSON.parse(ref).channelId; } catch {}
+
+      if (channelId) {
+        const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId).catch(()=>null);
+        if (channel) {
+          await channel.send(`✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] handler error:', err);
+  }
+  res.status(200).end();
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('[webhook] listening on port', PORT));
 
 // ===== KEEP THIS AT THE VERY BOTTOM =====
 
