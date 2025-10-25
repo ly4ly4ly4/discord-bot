@@ -9,8 +9,8 @@ const {
   MessageFlags
 } = require('discord.js');
 
-const express = require('express'); // NEW
-const { createAndShareInvoice, verifyWebhookSignature } = require('./paypal'); // NEW
+const express = require('express');
+const { createAndShareInvoice, verifyWebhookSignature } = require('./paypal');
 
 const client = new Client({
   intents: [
@@ -20,23 +20,22 @@ const client = new Client({
   ]
 });
 
-// Only these users can run !purchase or /completeorder or /pvbserver or /gagserver (and /invoice)
+// Allowed users for seller commands
 const ALLOWED_USERS = ['1116953633364398101', '456358634868441088'];
 
-// ID of your proofs channel
+// Proofs channel
 const PROOFS_CHANNEL_ID = '1406121226367275008';
 
 // Emojis
 const EMOJI_THANKYOU = '<:heartssss:1410132419524169889>';
 const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 
-// Roblox private server links (Railway → Variables)
+// Roblox private server links
 const PVB_LINK = process.env.PVB_LINK || '';
 const GAG_LINK = process.env.GAG_LINK || '';
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   console.log('RAILWAY_GIT_COMMIT_SHA:', process.env.RAILWAY_GIT_COMMIT_SHA || '(none)');
   console.log('RAILWAY_GIT_BRANCH:', process.env.RAILWAY_GIT_BRANCH || '(none)');
 
@@ -48,82 +47,74 @@ client.once('ready', async () => {
   }
 });
 
-// ========== PREFIX COMMAND: !purchase ==========
+// ====== PREFIX COMMAND: !purchase ======
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+  if (!message.content.startsWith('!purchase')) return;
 
-  if (message.content.startsWith('!purchase')) {
-    if (!ALLOWED_USERS.includes(message.author.id)) {
-      return message.reply('❌ You don’t have permission to run this command.');
+  if (!ALLOWED_USERS.includes(message.author.id)) {
+    return message.reply('❌ You don’t have permission to run this command.');
+  }
+
+  const args = message.content.split(' ');
+  if (args.length < 3) {
+    return message.reply('Usage: `!purchase @Buyer ItemName` (attach image for proof)');
+  }
+
+  const buyer = args[1];
+  const item = args.slice(2).join(' ');
+  let attachmentFile = null;
+  if (message.attachments.size > 0) {
+    const a = message.attachments.first();
+    attachmentFile = { attachment: a.url, name: a.name || 'proof.png' };
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0xf98df2)
+    .setTitle('Purchase Confirmed! 🎉')
+    .addFields(
+      { name: 'Buyer', value: buyer, inline: true },
+      { name: 'Item(s)', value: item }
+    )
+    .setFooter({ text: 'Thanks for buying! – ysl' })
+    .setTimestamp();
+
+  if (attachmentFile) embed.setImage(`attachment://${attachmentFile.name}`);
+
+  const proofsChannel = message.guild.channels.cache.get(PROOFS_CHANNEL_ID);
+  if (!proofsChannel) return message.reply('⚠️ Could not find the proofs channel.');
+
+  const content =
+    `**Thank you for your purchase ${buyer} ${EMOJI_THANKYOU}**\n` +
+    `**We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}**`;
+
+  try {
+    if (attachmentFile) {
+      await proofsChannel.send({ content, embeds: [embed], files: [attachmentFile] });
+    } else {
+      await proofsChannel.send({ content, embeds: [embed] });
     }
-
-    const args = message.content.split(' ');
-    if (args.length < 3) {
-      return message.reply('Usage: `!purchase @Buyer ItemName` (attach image for proof)');
-    }
-
-    const buyer = args[1];
-    const item = args.slice(2).join(' ');
-
-    let attachmentFile = null;
-    if (message.attachments.size > 0) {
-      const a = message.attachments.first();
-      attachmentFile = { attachment: a.url, name: a.name || 'proof.png' };
-    }
-
-    const embed = new EmbedBuilder()
-      .setColor(0xf98df2)
-      .setTitle('Purchase Confirmed! 🎉')
-      .addFields(
-        { name: 'Buyer', value: buyer, inline: true },
-        { name: 'Item(s)', value: item }
-      )
-      .setFooter({ text: 'Thanks for buying! – ysl' })
-      .setTimestamp();
-
-    if (attachmentFile) embed.setImage(`attachment://${attachmentFile.name}`);
-
-    const proofsChannel = message.guild.channels.cache.get(PROOFS_CHANNEL_ID);
-    if (!proofsChannel) {
-      return message.reply('⚠️ Could not find the proofs channel.');
-    }
-
-    const content =
-      `**Thank you for your purchase ${buyer} ${EMOJI_THANKYOU}**\n` +
-      `**We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}**`;
-
-    try {
-      if (attachmentFile) {
-        await proofsChannel.send({ content, embeds: [embed], files: [attachmentFile] });
-      } else {
-        await proofsChannel.send({ content, embeds: [embed] });
-      }
-    } catch (err) {
-      console.error('Error sending proof message:', err);
-      await message.reply('⚠️ Failed to post in #proofs (check bot permissions and file size).');
-    }
+  } catch (err) {
+    console.error('Error sending proof message:', err);
+    await message.reply('⚠️ Failed to post in #proofs (check bot permissions and file size).');
   }
 });
 
-// ========== SLASH COMMANDS ==========
+// ====== SLASH COMMANDS ======
 client.on(Events.InteractionCreate, async (interaction) => {
-  try {
-    console.log(`[interaction] isChatInput=${interaction.isChatInputCommand?.()} name=${interaction.commandName || 'n/a'} user=${interaction.user?.id || 'n/a'} guild=${interaction.guildId || 'DM'}`);
-  } catch {}
-
   if (!interaction.isChatInputCommand()) return;
 
-  // ---- /ping ----
+  console.log(`[interaction] name=${interaction.commandName} user=${interaction.user.id}`);
+
+  // /ping
   if (interaction.commandName === 'ping') {
-    console.log('[ping] invoked by', interaction.user.id, interaction.user.tag);
     return interaction.reply({ content: 'pong', flags: MessageFlags.Ephemeral });
   }
 
-  // ---- /completeorder ----
+  // /completeorder
   if (interaction.commandName === 'completeorder') {
-    if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
-    }
+    if (!ALLOWED_USERS.includes(interaction.user.id))
+      return interaction.reply({ content: '❌ You do not have permission.', flags: MessageFlags.Ephemeral });
 
     const buyer = interaction.options.getUser('buyer');
     const item = interaction.options.getString('item');
@@ -137,141 +128,72 @@ client.on(Events.InteractionCreate, async (interaction) => {
         { name: 'Item(s)', value: item }
       )
       .setFooter({ text: 'Thanks for buying! – ysl' })
-      .setTimestamp();
-
-    const file = { attachment: proofAttachment.url, name: proofAttachment.name || 'proof.png' };
-    embed.setImage(`attachment://${file.name}`);
+      .setTimestamp()
+      .setImage(proofAttachment.url);
 
     const proofsChannel = interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID);
-    if (!proofsChannel) {
-      return interaction.reply({ content: '⚠️ Could not find the proofs channel.', flags: MessageFlags.Ephemeral });
-    }
+    if (!proofsChannel)
+      return interaction.reply({ content: '⚠️ Proofs channel not found.', flags: MessageFlags.Ephemeral });
 
     const content =
       `## Thank you for your purchase <@${buyer.id}> ${EMOJI_THANKYOU}\n` +
-      `## We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}`;
+      `## Please leave us a vouch! ${EMOJI_VOUCH}`;
 
-    try {
-      await interaction.reply({ content: '✅ Posted your proof in #proofs.', flags: MessageFlags.Ephemeral });
-      await proofsChannel.send({ content, embeds: [embed], files: [file] });
-    } catch (err) {
-      console.error('Error sending proof message:', err);
-      if (!interaction.replied) {
-        await interaction.reply({ content: '⚠️ Failed to post in #proofs (check bot permissions and file size).', flags: MessageFlags.Ephemeral });
-      }
-    }
-    return;
+    await proofsChannel.send({ content, embeds: [embed] });
+    return interaction.reply({ content: '✅ Proof posted.', flags: MessageFlags.Ephemeral });
   }
 
-  // ---- /pvbserver ----
+  // /pvbserver
   if (interaction.commandName === 'pvbserver') {
-    try {
-      console.log('[pvbserver] invoked by', interaction.user.id, interaction.user.tag);
+    if (!ALLOWED_USERS.includes(interaction.user.id))
+      return interaction.reply({ content: '❌ You do not have permission.', flags: MessageFlags.Ephemeral });
 
-      if (!ALLOWED_USERS.includes(interaction.user.id)) {
-        console.log('[pvbserver] blocked: not allowed');
-        return interaction.reply({
-          content: '❌ You do not have permission to use this command.',
-          flags: MessageFlags.Ephemeral
-        });
-      }
+    if (!PVB_LINK)
+      return interaction.reply({ content: '⚠️ Missing PVB_LINK in Railway.', flags: MessageFlags.Ephemeral });
 
-      await interaction.deferReply(); // public response later
+    const embed = new EmbedBuilder()
+      .setColor(0x00a2ff)
+      .setTitle('PVB Private Server')
+      .setDescription(`Here’s the PVB link:\n${PVB_LINK}`);
 
-      if (!PVB_LINK) {
-        console.log('[pvbserver] missing PVB_LINK env var');
-        return interaction.editReply('⚠️ The private server link is not set yet. Ask an admin to set the `PVB_LINK` variable in Railway.');
-      }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('Join Private Server').setStyle(ButtonStyle.Link).setURL(PVB_LINK)
+    );
 
-      const embed = new EmbedBuilder()
-        .setColor(0x00a2ff)
-        .setTitle('PVB Private Server')
-        .setDescription(`Here’s the PVB private server link, please state your username before joining:\n${PVB_LINK}`)
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel('Join Private Server')
-          .setStyle(ButtonStyle.Link)
-          .setURL(PVB_LINK)
-      );
-
-      await interaction.editReply({ embeds: [embed], components: [row] });
-      console.log('[pvbserver] reply sent');
-    } catch (err) {
-      console.error('[pvbserver] error', err);
-      if (interaction.deferred && !interaction.replied) {
-        await interaction.editReply('⚠️ Something went wrong while sending the link.');
-      } else if (!interaction.replied) {
-        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', flags: MessageFlags.Ephemeral });
-      }
-    }
-    return;
+    return interaction.reply({ embeds: [embed], components: [row] });
   }
 
-  // ---- /gagserver ----
+  // /gagserver
   if (interaction.commandName === 'gagserver') {
-    try {
-      console.log('[gagserver] invoked by', interaction.user.id, interaction.user.tag);
+    if (!ALLOWED_USERS.includes(interaction.user.id))
+      return interaction.reply({ content: '❌ You do not have permission.', flags: MessageFlags.Ephemeral });
 
-      if (!ALLOWED_USERS.includes(interaction.user.id)) {
-        console.log('[gagserver] blocked: not allowed');
-        return interaction.reply({
-          content: '❌ You do not have permission to use this command.',
-          flags: MessageFlags.Ephemeral
-        });
-      }
+    if (!GAG_LINK)
+      return interaction.reply({ content: '⚠️ Missing GAG_LINK in Railway.', flags: MessageFlags.Ephemeral });
 
-      await interaction.deferReply(); // public
+    const embed = new EmbedBuilder()
+      .setColor(0x00c853)
+      .setTitle('GAG Private Server')
+      .setDescription(`Here’s the GAG link:\n${GAG_LINK}`);
 
-      if (!GAG_LINK) {
-        console.log('[gagserver] missing GAG_LINK env var');
-        return interaction.editReply('⚠️ The GAG private server link is not set yet. Ask an admin to set the `GAG_LINK` variable in Railway.');
-      }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('Join GAG Private Server').setStyle(ButtonStyle.Link).setURL(GAG_LINK)
+    );
 
-      const embed = new EmbedBuilder()
-        .setColor(0x00c853)
-        .setTitle('GAG Private Server')
-        .setDescription(`Here’s the GAG private server link, please state your username before joining:\n${GAG_LINK}`)
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel('Join GAG Private Server')
-          .setStyle(ButtonStyle.Link)
-          .setURL(GAG_LINK)
-      );
-
-      await interaction.editReply({ embeds: [embed], components: [row] });
-      console.log('[gagserver] reply sent');
-    } catch (err) {
-      console.error('[gagserver] error', err);
-      if (interaction.deferred && !interaction.replied) {
-        await interaction.editReply('⚠️ Something went wrong while sending the link.');
-      } else if (!interaction.replied) {
-        await interaction.reply({ content: '⚠️ Something went wrong while sending the link.', flags: MessageFlags.Ephemeral });
-      }
-    }
-    return;
+    return interaction.reply({ embeds: [embed], components: [row] });
   }
 
-  // ---- /invoice (USD only) ----
+  // /invoice (USD only)
   if (interaction.commandName === 'invoice') {
-    if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
-    }
+    if (!ALLOWED_USERS.includes(interaction.user.id))
+      return interaction.reply({ content: '❌ You do not have permission.', flags: MessageFlags.Ephemeral });
 
-    await interaction.deferReply(); // public in staff/ticket channel
-
+    await interaction.deferReply();
     const itemName = interaction.options.getString('item');
-    const howmuch  = interaction.options.getNumber('howmuch');
-
-    if (howmuch <= 0) {
-      return interaction.editReply('⚠️ Amount must be greater than 0.');
-    }
+    const howmuch = interaction.options.getNumber('howmuch');
+    if (howmuch <= 0) return interaction.editReply('⚠️ Amount must be greater than 0.');
 
     const amountUSD = howmuch.toFixed(2);
-
     try {
       const reference = JSON.stringify({
         guildId: interaction.guildId,
@@ -281,7 +203,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const { id, payLink } = await createAndShareInvoice({
         itemName,
-        amountUSD, // Always USD
+        amountUSD,
         reference
       });
 
@@ -290,28 +212,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
 
       await interaction.editReply({
-        content: `Invoice **${id}** for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
+        content: `Invoice **${id}** for **${itemName}** (${amountUSD} USD).`,
         components: [row]
       });
     } catch (e) {
       console.error('[invoice] error:', e);
-      await interaction.editReply('⚠️ Could not create/send the invoice. Check PayPal env vars & Railway logs.');
+      await interaction.editReply('⚠️ Could not create/send the invoice. Check PayPal env vars.');
     }
-    return;
   }
 });
 
-// ===== PayPal Webhook HTTP server (runs inside the same bot process) =====
+// ====== WEBHOOK SERVER ======
 const app = express();
-app.use(express.json({ type: '*/*' })); // accept JSON from PayPal
+app.use(express.json({ type: '*/*' }));
 
 app.post('/paypal/webhook', async (req, res) => {
   try {
+    console.log('[webhook] event:', req.body?.event_type);
     const ok = await verifyWebhookSignature(req);
-    if (!ok) {
-      console.warn('[webhook] verification failed');
-      return res.status(400).end();
-    }
+    console.log('[webhook] verification:', ok ? '✅ passed' : '❌ failed');
+
+    if (!ok) return res.status(400).end();
 
     const ev = req.body;
     if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
@@ -321,9 +242,12 @@ app.post('/paypal/webhook', async (req, res) => {
       try { channelId = JSON.parse(ref).channelId; } catch {}
 
       if (channelId) {
-        const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId).catch(()=>null);
+        const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId).catch(() => null);
         if (channel) {
           await channel.send(`✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`);
+          console.log('[webhook] posted confirmation in Discord');
+        } else {
+          console.log('[webhook] could not find channel');
         }
       }
     }
@@ -333,33 +257,18 @@ app.post('/paypal/webhook', async (req, res) => {
   res.status(200).end();
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log('[webhook] listening on port', PORT));
 
-// ===== KEEP THIS AT THE VERY BOTTOM =====
-
-// Global error handlers
-process.on('unhandledRejection', (err) => {
-  console.error('[global] Unhandled Rejection:', err);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('[global] Uncaught Exception:', err);
-});
+// ====== ERROR HANDLING & LOGIN ======
+process.on('unhandledRejection', (err) => console.error('[global] Unhandled Rejection:', err));
+process.on('uncaughtException', (err) => console.error('[global] Uncaught Exception:', err));
 client.on('error', (err) => console.error('[client] error:', err));
 client.on('shardError', (err) => console.error('[client] shardError:', err));
 
 const TOKEN = process.env.BOT_TOKEN;
-
-if (!TOKEN || TOKEN.trim().length === 0) {
-  console.error('❌ Missing BOT_TOKEN env var. Set it in Railway → Variables (or Shared Variables linked to this service).');
-} else {
+if (!TOKEN) console.error('❌ Missing BOT_TOKEN env var.');
+else {
   console.log('BOT_TOKEN detected. Attempting login…');
+  client.login(TOKEN).then(() => console.log('Login promise resolved.'));
 }
-
-client.login(TOKEN)
-  .then(() => console.log('Login promise resolved.'))
-  .catch((err) => {
-    console.error('❌ Login failed:', err);
-    setTimeout(() => process.exit(1), 15000);
-  });
