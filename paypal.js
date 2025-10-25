@@ -1,10 +1,8 @@
-// paypal.js — uses Node's built-in fetch (no node-fetch needed)
+// paypal.js — updated for reliable channel tracking via invoice_number
+// - Embeds channelId + timestamp into invoice_number for webhook recovery
+// - Keeps all previous behavior (OAuth, retries, payer link fallback)
 // - Always USD
-// - Adds placeholder recipient so PayPal allows "send"
-// - Requests full representation on create (Prefer header)
-// - Falls back to Location header if body is empty
-// - Small delay + one retry on /send 404
-// - Uses payer_view link (with safe fallback URL)
+// - Works with both sandbox and live
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -40,13 +38,22 @@ async function getAccessToken() {
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
-  // Must provide a recipient or PayPal refuses to "send"
+  // Extract channel ID from reference for embedding
+  let channelId = null;
+  try {
+    const refObj = JSON.parse(reference);
+    channelId = refObj.channelId || null;
+  } catch {
+    channelId = null;
+  }
+
+  // Always include a recipient (PayPal requires one)
   const recipientEmail =
     process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
     process.env.SELLER_EMAIL ||
     'placeholder@example.com';
 
-  // 1) Create invoice (ask PayPal to return body; USD only)
+  // 1) Create invoice (USD only, full representation)
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
     method: 'POST',
     headers: {
@@ -57,7 +64,10 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     body: JSON.stringify({
       detail: {
         currency_code: 'USD',
-        invoice_number: `INV-${Date.now()}`,
+        // Embed channelId + timestamp to recover even if bot restarts
+        invoice_number: channelId
+          ? `ch_${channelId}_${Date.now()}`
+          : `INV-${Date.now()}`,
         reference,
         note: itemName,
         terms_and_conditions: 'Digital goods. No shipping.',
@@ -84,7 +94,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }),
   });
 
-  // Body may be empty; fall back to Location header
+  // Body may be empty; fallback to Location header
   let invoice = null;
   let bodyText = await createRes.text().catch(() => '');
   if (bodyText && bodyText.trim().length > 0) {
@@ -93,7 +103,8 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     } catch {}
   }
   if (!invoice?.id) {
-    const loc = createRes.headers.get('location') || createRes.headers.get('Location');
+    const loc =
+      createRes.headers.get('location') || createRes.headers.get('Location');
     if (loc) {
       const parts = loc.split('/');
       const maybeId = parts[parts.length - 1];
@@ -104,7 +115,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
 
   console.log('[paypal] created invoice id:', invoice.id);
 
-  // Small propagation delay, then read status (useful in logs)
+  // Small propagation delay + check status
   await sleep(300);
   let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -112,11 +123,14 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const before = await getRes.json().catch(() => ({}));
   console.log('[paypal] invoice status before send:', before?.status);
 
-  // 2) Send invoice (retry once on 404 / propagation)
+  // 2) Send invoice (retry once if 404)
   async function trySend() {
     const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ send_to_invoicer: true }),
     });
     if (!r.ok) {
@@ -134,7 +148,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   }
   if (!send.ok) throw new Error('Send invoice failed: ' + send.body);
 
-  // 3) Get the payer link (or build it)
+  // 3) Retrieve payer link (payer_view preferred)
   getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -155,27 +169,34 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     payLink = `https://${host}/invoice/payerView/details/${invoice.id}`;
   }
 
-  if (!payLink) throw new Error('Could not find payer link on invoice after send');
+  if (!payLink)
+    throw new Error('Could not find payer link on invoice after send');
 
   return { id: invoice.id, payLink };
 }
 
-// -------- Webhook verification --------
+// -------- Webhook Verification --------
 async function verifyWebhookSignature(req) {
   const token = await getAccessToken();
-  const verifyRes = await fetch(`${BASE}/v1/notifications/verify-webhook-signature`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      transmission_id: req.headers['paypal-transmission-id'],
-      transmission_time: req.headers['paypal-transmission-time'],
-      cert_url: req.headers['paypal-cert-url'],
-      auth_algo: req.headers['paypal-auth-algo'],
-      transmission_sig: req.headers['paypal-transmission-sig'],
-      webhook_id: process.env.WEBHOOK_ID || '',
-      webhook_event: req.body,
-    }),
-  });
+  const verifyRes = await fetch(
+    `${BASE}/v1/notifications/verify-webhook-signature`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        transmission_id: req.headers['paypal-transmission-id'],
+        transmission_time: req.headers['paypal-transmission-time'],
+        cert_url: req.headers['paypal-cert-url'],
+        auth_algo: req.headers['paypal-auth-algo'],
+        transmission_sig: req.headers['paypal-transmission-sig'],
+        webhook_id: process.env.WEBHOOK_ID || '',
+        webhook_event: req.body,
+      }),
+    }
+  );
   const verify = await verifyRes.json().catch(() => ({}));
   return verify?.verification_status === 'SUCCESS';
 }

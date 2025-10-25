@@ -33,6 +33,16 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 const PVB_LINK = process.env.PVB_LINK || '';
 const GAG_LINK = process.env.GAG_LINK || '';
 
+// ===== In-memory invoice map =====
+// Stores invoiceId -> channelId for a while to handle cases where PayPal
+// doesn’t echo back the reference in the webhook.
+const runtimeInvoiceMap = new Map(); // invoiceId => channelId
+const rememberInvoiceChannel = (invoiceId, channelId) => {
+  runtimeInvoiceMap.set(invoiceId, channelId);
+  // Auto-expire after 7 days (adjust if you want)
+  setTimeout(() => runtimeInvoiceMap.delete(invoiceId), 7 * 24 * 60 * 60 * 1000);
+};
+
 // ===== Bot ready =====
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -207,9 +217,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const amountUSD = howmuch.toFixed(2);
 
     try {
+      // Keep the same reference structure (if PayPal echoes it back, great)
       const reference = JSON.stringify({
         guildId: interaction.guildId,
-        channelId: interaction.channelId,   // <— ticket/original channel
+        channelId: interaction.channelId,   // original ticket/channel
         invokerId: interaction.user.id
       });
 
@@ -218,6 +229,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         amountUSD, // Always USD
         reference
       });
+
+      // Save a local mapping in case the webhook doesn’t return the reference.
+      rememberInvoiceChannel(id, interaction.channelId);
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
@@ -242,7 +256,7 @@ app.use(express.json({ type: '*/*' })); // accept JSON
 // optional health
 app.get('/', (_req, res) => res.send('OK'));
 
-// ==== UPDATED: post in original ticket + fallback channel ====
+// ==== Post in original ticket + fallback channel ====
 app.post('/paypal/webhook', async (req, res) => {
   try {
     const ev = req.body;
@@ -257,7 +271,6 @@ app.post('/paypal/webhook', async (req, res) => {
     if (!ok) return;
 
     if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
-      // Try to pull invoice id and amount from payload
       const invoiceId =
         ev?.resource?.id ||
         ev?.resource?.invoice_id ||
@@ -269,18 +282,31 @@ app.post('/paypal/webhook', async (req, res) => {
           ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
           : null;
 
-      // reference we stored when creating the invoice
+      // Pull channel from multiple places (whichever exists)
       const refRaw =
         ev?.resource?.detail?.reference ??
         ev?.resource?.detail?.invoice_number ??
         null;
       console.log('[webhook] refRaw:', refRaw);
 
-      let parsed = {};
-      try { parsed = JSON.parse(refRaw); } catch {}
+      let parsedRef = {};
+      try { parsedRef = JSON.parse(refRaw); } catch {}
 
-      // Post in original channel (from reference) AND fallback channel
-      const primaryChannelId = parsed?.channelId || null;
+      let channelFromRef = parsedRef?.channelId || null;
+
+      // If you later encode channel into invoice_number like "ch_123456789012345678",
+      // this will extract it as a fallback:
+      if (!channelFromRef && typeof refRaw === 'string') {
+        const m = refRaw.match(/ch_(\d{17,20})/);
+        if (m) channelFromRef = m[1];
+      }
+
+      // Final fallback: use our runtime map
+      const channelFromMap = runtimeInvoiceMap.get(
+        (ev?.resource?.id || ev?.resource?.invoice_id || '').toString()
+      ) || null;
+
+      const primaryChannelId = channelFromRef || channelFromMap || null;
       const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
 
       const notifyIds = [...new Set([primaryChannelId, fallbackChannelId].filter(Boolean))];
