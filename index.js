@@ -264,101 +264,116 @@ app.post('/paypal/webhook', async (req, res) => {
     const ok = await verifyWebhookSignature(req);
     console.log('[webhook] verification:', ok ? '✅ passed' : '❌ failed');
 
+    // ACK quickly
     res.status(200).end();
     if (!ok) return;
 
-    if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
-      const invoiceId =
-        ev?.resource?.id ||
-        ev?.resource?.invoice_id ||
-        ev?.resource?.detail?.invoice_number ||
-        '(unknown)';
+    if (ev?.event_type !== 'INVOICING.INVOICE.PAID') return;
 
-      const amount =
-        ev?.resource?.amount?.value && ev?.resource?.amount?.currency_code
-          ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
-          : null;
+    const resource = ev?.resource || {};
+    console.log('[webhook] map size before:', runtimeInvoiceMap.size);
 
-      let channelFromRef = null;
+    // 1) Resolve invoiceId from many places (including href)
+    let invoiceId =
+      resource.id ||
+      resource.invoice_id ||
+      resource?.detail?.invoice_id ||
+      resource?.detail?.invoice_number ||
+      null;
 
-      // 1) Try reference from the webhook event
-      let refRaw =
-        ev?.resource?.detail?.reference ??
-        ev?.resource?.detail?.invoice_number ??
-        null;
+    if (!invoiceId) {
+      const href =
+        resource.href ||
+        (Array.isArray(resource.links)
+          ? (resource.links.find(l => l.rel === 'self' || l.rel === 'detail')?.href || null)
+          : null);
+      if (href) {
+        const m = href.match(/\/invoices\/([^/?#]+)/i);
+        if (m) invoiceId = m[1];
+      }
+    }
 
-      console.log('[webhook] map size before:', runtimeInvoiceMap.size);
-      console.log('[webhook] invoiceId:', invoiceId);
-      console.log('[webhook] refRaw (from event):', refRaw);
+    console.log('[webhook] invoiceId resolved:', invoiceId || '(unknown)');
 
-      if (typeof refRaw === 'string') {
-        try {
-          const parsed = JSON.parse(refRaw);
-          if (parsed?.channelId) channelFromRef = parsed.channelId;
-        } catch {}
-        if (!channelFromRef) {
-          const m = refRaw.match(/ch_(\d{17,20})/);
+    // 2) Try to recover channel from event reference
+    let channelFromRef = null;
+    let refRaw =
+      resource?.detail?.reference ??
+      resource?.detail?.invoice_number ??
+      null;
+    console.log('[webhook] refRaw (from event):', refRaw);
+
+    if (typeof refRaw === 'string') {
+      try {
+        const parsed = JSON.parse(refRaw);
+        if (parsed?.channelId) channelFromRef = parsed.channelId;
+      } catch {}
+      if (!channelFromRef) {
+        const m = refRaw.match(/ch_(\d{17,20})/);
+        if (m) channelFromRef = m[1];
+      }
+    }
+
+    // 3) Also try in-memory map
+    const channelFromMap =
+      runtimeInvoiceMap.get((resource.id || resource.invoice_id || invoiceId || '').toString()) || null;
+    if (channelFromMap) {
+      console.log('[webhook] recovered channel from map:', channelFromMap);
+    }
+
+    // 4) If still no channel, fetch invoice and read its reference/invoice_number
+    if (!channelFromRef && invoiceId) {
+      try {
+        const inv = await getInvoiceById(invoiceId);
+        const invRef = inv?.detail?.reference || null;
+        const invNum = inv?.detail?.invoice_number || null;
+        console.log('[webhook] fetched invoice; reference:', invRef, 'invoice_number:', invNum);
+
+        if (typeof invRef === 'string') {
+          try {
+            const parsed = JSON.parse(invRef);
+            if (parsed?.channelId) channelFromRef = parsed.channelId;
+          } catch {}
+        }
+        if (!channelFromRef && typeof invNum === 'string') {
+          const m = invNum.match(/ch_(\d{17,20})/);
           if (m) channelFromRef = m[1];
         }
+      } catch (e) {
+        console.log('[webhook] getInvoiceById failed:', e?.message || e);
       }
+    }
 
-      // 2) Try in-memory map
-      const channelFromMap =
-        runtimeInvoiceMap.get((ev?.resource?.id || ev?.resource?.invoice_id || '').toString()) || null;
-      if (channelFromMap) {
-        console.log('[webhook] recovered channel from map:', channelFromMap);
-      }
+    // 5) Build list of channels to notify: original ticket (if found) + staff
+    const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
+    const notifyIds = [...new Set([channelFromRef, channelFromMap, fallbackChannelId].filter(Boolean))];
+    console.log('[webhook] notifying channels:', notifyIds);
 
-      // 3) ALWAYS try fetching the invoice if we still don't have channelFromRef
-      if (!channelFromRef && invoiceId && invoiceId !== '(unknown)') {
-        try {
-          const inv = await getInvoiceById(invoiceId);
-          const invRef = inv?.detail?.reference || null;
-          const invNum = inv?.detail?.invoice_number || null;
-          console.log('[webhook] fetched invoice; reference:', invRef, 'invoice_number:', invNum);
+    if (notifyIds.length === 0) {
+      console.log('[webhook] no channels available; set PAID_CHANNEL_ID or PROOFS_CHANNEL_ID');
+      return;
+    }
 
-          if (typeof invRef === 'string') {
-            try {
-              const parsed = JSON.parse(invRef);
-              if (parsed?.channelId) channelFromRef = parsed.channelId;
-            } catch {}
-          }
-          if (!channelFromRef && typeof invNum === 'string') {
-            const m = invNum.match(/ch_(\d{17,20})/);
-            if (m) channelFromRef = m[1];
-          }
-        } catch (e) {
-          console.log('[webhook] getInvoiceById failed:', e?.message || e);
+    const amount =
+      resource?.amount?.value && resource?.amount?.currency_code
+        ? `${resource.amount.value} ${resource.amount.currency_code}`
+        : null;
+
+    const msg = amount
+      ? `✅ **Paid** — Invoice \`${invoiceId || '(unknown)'}\` has been paid (**${amount}**).`
+      : `✅ **Paid** — Invoice \`${invoiceId || '(unknown)'}\` has been paid.`;
+
+    for (const id of notifyIds) {
+      try {
+        const ch = client.channels.cache.get(id) || await client.channels.fetch(id);
+        if (ch) {
+          await ch.send(msg);
+          console.log('[webhook] posted confirmation in channel', id);
+        } else {
+          console.log('[webhook] channel not found', id);
         }
-      }
-
-      // Notify both: original ticket (from ref / fetched) + staff fallback
-      const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
-      const notifyIds = [...new Set([channelFromRef, channelFromMap, fallbackChannelId].filter(Boolean))];
-
-      console.log('[webhook] notifying channels:', notifyIds);
-
-      if (notifyIds.length === 0) {
-        console.log('[webhook] no channels available; set PAID_CHANNEL_ID or PROOFS_CHANNEL_ID');
-        return;
-      }
-
-      const msg = amount
-        ? `✅ **Paid** — Invoice \`${invoiceId}\` has been paid (**${amount}**).`
-        : `✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`;
-
-      for (const id of notifyIds) {
-        try {
-          const ch = client.channels.cache.get(id) || await client.channels.fetch(id);
-          if (ch) {
-            await ch.send(msg);
-            console.log('[webhook] posted confirmation in channel', id);
-          } else {
-            console.log('[webhook] channel not found', id);
-          }
-        } catch (e) {
-          console.log('[webhook] send error for channel', id, e?.message || e);
-        }
+      } catch (e) {
+        console.log('[webhook] send error for channel', id, e?.message || e);
       }
     }
   } catch (err) {
