@@ -1,4 +1,5 @@
 // paypal.js — resilient create/search/send with retries + idempotency
+// (fixed: invoice_number <= 25 chars)
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -51,15 +52,14 @@ function extractPayerLink(full, invoiceId) {
 
 /* ------------- Helper: search by invoice_number with retries ------------- */
 async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
-  // Narrow search first (status filter), then broaden
-  const payloadNarrow = {
+  const narrow = {
     invoice_number: invoiceNumber,
     status: ['DRAFT', 'UNPAID'],
     page: 1,
     page_size: 20,
     total_required: false,
   };
-  const payloadBroad = {
+  const broad = {
     invoice_number: invoiceNumber,
     page: 1,
     page_size: 20,
@@ -67,15 +67,13 @@ async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
   };
 
   for (let i = attempt; i < 6; i++) {
-    // 0,1,2,3,4,5 → wait 250, 400, 600, 800, 1000, 1200ms
-    const wait = 250 + i * 150;
+    const wait = 250 + i * 150; // 250..1000+ ms
     if (i > 0) await sleep(wait);
 
-    // Narrow
     let res = await fetch(`${BASE}/v2/invoicing/search-invoices`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payloadNarrow),
+      body: JSON.stringify(narrow),
     });
     let data = await res.json().catch(() => ({}));
     let match = Array.isArray(data.items)
@@ -83,11 +81,10 @@ async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
       : null;
     if (match?.id) return match.id;
 
-    // Broad
     res = await fetch(`${BASE}/v2/invoicing/search-invoices`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payloadBroad),
+      body: JSON.stringify(broad),
     });
     data = await res.json().catch(() => ({}));
     match = Array.isArray(data.items)
@@ -102,29 +99,34 @@ async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
+  // Pull channelId (if present in our JSON reference)
   let channelId = null;
-  try {
-    channelId = JSON.parse(reference)?.channelId || null;
-  } catch {}
+  try { channelId = JSON.parse(reference)?.channelId || null; } catch {}
 
-  // Use a unique, idempotent number. Also used for search.
-  const invoiceNumber = channelId
-    ? `ch_${channelId}_${Date.now()}`
-    : `ts_${Date.now()}`;
+  // ==== SHORT, SAFE invoice_number (<= 24 chars) ====
+  // format: iv<tsBase36>[c<last6_of_channel>], then slice(0, 24)
+  const ts36 = Date.now().toString(36);                 // ~8–9 chars
+  const ch6  = channelId ? `c${String(channelId).slice(-6)}` : '';
+  let invoiceNumber = `iv${ts36}${ch6}`;                // e.g., "ivlmn0pqrsc123456"
+  invoiceNumber = invoiceNumber.slice(0, 24);           // PayPal limit is <25
 
+  // At least 3 chars to be safe (PayPal requires 1+, but we keep a prefix anyway)
+  if (invoiceNumber.length < 3) invoiceNumber = `iv${ts36}`.slice(0, 24);
+
+  // Recipient placeholder so PayPal lets us "send"
   const recipientEmail =
     process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
     process.env.SELLER_EMAIL ||
     'placeholder@example.com';
 
-  // ---- 1) CREATE (ask for body; add idempotency header) ----
+  // ---- 1) CREATE (with idempotency) ----
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
-      'PayPal-Request-Id': invoiceNumber,
+      'PayPal-Request-Id': invoiceNumber, // idempotent key
     },
     body: JSON.stringify({
       detail: {
@@ -141,9 +143,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
         },
         email_address: process.env.SELLER_EMAIL || undefined,
       },
-      primary_recipients: [
-        { billing_info: { email_address: recipientEmail } },
-      ],
+      primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
       items: [
         {
           name: itemName,
@@ -168,7 +168,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }
   }
 
-  // ---- Fallback: retry search a few times (indexing delay) ----
+  // Fallback: search (indexing delay)
   if (!invoice?.id) {
     console.warn('[paypal] create returned no ID; searching by invoice_number…');
     const recoveredId = await searchInvoiceByNumber(token, invoiceNumber, 0);
@@ -176,7 +176,6 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       console.log('[paypal] recovered invoice id via search:', recoveredId);
       invoice = { id: recoveredId };
     } else {
-      // Log status/body once to help diagnose PayPal oddities
       console.warn('[paypal] create status:', createRes.status);
       console.warn('[paypal] create body (truncated):', (createText || '').slice(0, 500));
     }
@@ -185,7 +184,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   if (!invoice?.id) throw new Error('Create invoice returned no id');
   console.log('[paypal] created invoice id:', invoice.id);
 
-  // Small delay then read invoice to get status
+  // Read current status
   await sleep(300);
   let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -194,7 +193,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   let status = current?.status || 'UNKNOWN';
   console.log('[paypal] invoice status before send:', status);
 
-  // ---- 2) Only send when DRAFT ----
+  // ---- 2) Send only when DRAFT ----
   if (status === 'DRAFT') {
     async function trySend() {
       const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
