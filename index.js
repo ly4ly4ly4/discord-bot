@@ -10,7 +10,7 @@ const {
 } = require('discord.js');
 
 const express = require('express');
-const { createAndShareInvoice, verifyWebhookSignature } = require('./paypal');
+const { createAndShareInvoice, verifyWebhookSignature, getInvoiceById } = require('./paypal');
 
 const client = new Client({
   intents: [
@@ -34,12 +34,9 @@ const PVB_LINK = process.env.PVB_LINK || '';
 const GAG_LINK = process.env.GAG_LINK || '';
 
 // ===== In-memory invoice map =====
-// Stores invoiceId -> channelId for a while to handle cases where PayPal
-// doesn’t echo back the reference in the webhook.
 const runtimeInvoiceMap = new Map(); // invoiceId => channelId
 const rememberInvoiceChannel = (invoiceId, channelId) => {
   runtimeInvoiceMap.set(invoiceId, channelId);
-  // Auto-expire after 7 days (adjust if you want)
   setTimeout(() => runtimeInvoiceMap.delete(invoiceId), 7 * 24 * 60 * 60 * 1000);
 };
 
@@ -217,7 +214,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const amountUSD = howmuch.toFixed(2);
 
     try {
-      // Keep the same reference structure (if PayPal echoes it back, great)
       const reference = JSON.stringify({
         guildId: interaction.guildId,
         channelId: interaction.channelId,   // original ticket/channel
@@ -282,30 +278,53 @@ app.post('/paypal/webhook', async (req, res) => {
           ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
           : null;
 
-      // Pull channel from multiple places (whichever exists)
-      const refRaw =
+      // --- Try to discover the original channel from the webhook payload ---
+      let channelFromRef = null;
+      let refRaw =
         ev?.resource?.detail?.reference ??
         ev?.resource?.detail?.invoice_number ??
         null;
-      console.log('[webhook] refRaw:', refRaw);
+      console.log('[webhook] refRaw (from event):', refRaw);
 
-      let parsedRef = {};
-      try { parsedRef = JSON.parse(refRaw); } catch {}
-
-      let channelFromRef = parsedRef?.channelId || null;
-
-      // If you later encode channel into invoice_number like "ch_123456789012345678",
-      // this will extract it as a fallback:
-      if (!channelFromRef && typeof refRaw === 'string') {
-        const m = refRaw.match(/ch_(\d{17,20})/);
-        if (m) channelFromRef = m[1];
+      if (typeof refRaw === 'string') {
+        try {
+          const parsed = JSON.parse(refRaw);
+          if (parsed?.channelId) channelFromRef = parsed.channelId;
+        } catch {}
+        if (!channelFromRef) {
+          const m = refRaw.match(/ch_(\d{17,20})/);
+          if (m) channelFromRef = m[1];
+        }
       }
 
-      // Final fallback: use our runtime map
-      const channelFromMap = runtimeInvoiceMap.get(
-        (ev?.resource?.id || ev?.resource?.invoice_id || '').toString()
-      ) || null;
+      // --- Try our in-memory map (from /invoice time) ---
+      const channelFromMap =
+        runtimeInvoiceMap.get((ev?.resource?.id || ev?.resource?.invoice_id || '').toString()) || null;
 
+      // --- If still unknown, fetch the invoice now and read its detail.reference ---
+      if (!channelFromRef && !channelFromMap && invoiceId && invoiceId !== '(unknown)') {
+        try {
+          const full = await getInvoiceById(invoiceId);
+          const invRef = full?.detail?.reference || null;
+          const invNum = full?.detail?.invoice_number || null;
+          console.log('[webhook] fetched invoice, reference:', invRef, 'invoice_number:', invNum);
+
+          if (typeof invRef === 'string') {
+            try {
+              const parsed = JSON.parse(invRef);
+              if (parsed?.channelId) channelFromRef = parsed.channelId;
+            } catch {}
+          }
+          if (!channelFromRef && typeof invNum === 'string') {
+            const m = invNum.match(/ch_(\d{17,20})/);
+            if (m) channelFromRef = m[1];
+          }
+        } catch (e) {
+          console.log('[webhook] getInvoiceById failed:', e?.message || e);
+        }
+      }
+
+      // --- Decide where to notify: ORIGINAL TICKET + PAID/STAFF ---
       const primaryChannelId = channelFromRef || channelFromMap || null;
       const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
 

@@ -104,16 +104,13 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   try { channelId = JSON.parse(reference)?.channelId || null; } catch {}
 
   // ==== SHORT, SAFE invoice_number (<= 24 chars) ====
-  // format: iv<tsBase36>[c<last6_of_channel>], then slice(0, 24)
-  const ts36 = Date.now().toString(36);                 // ~8–9 chars
+  const ts36 = Date.now().toString(36);         // ~8–9 chars
   const ch6  = channelId ? `c${String(channelId).slice(-6)}` : '';
-  let invoiceNumber = `iv${ts36}${ch6}`;                // e.g., "ivlmn0pqrsc123456"
-  invoiceNumber = invoiceNumber.slice(0, 24);           // PayPal limit is <25
+  let invoiceNumber = `iv${ts36}${ch6}`;        // e.g., "ivlmn0pqrsc123456"
+  invoiceNumber = invoiceNumber.slice(0, 24);   // PayPal limit is <25
 
-  // At least 3 chars to be safe (PayPal requires 1+, but we keep a prefix anyway)
   if (invoiceNumber.length < 3) invoiceNumber = `iv${ts36}`.slice(0, 24);
 
-  // Recipient placeholder so PayPal lets us "send"
   const recipientEmail =
     process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
     process.env.SELLER_EMAIL ||
@@ -233,6 +230,19 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   return { id: invoice.id, payLink };
 }
 
+/* ---------------- Fetch invoice by ID (for webhook recovery) ---------------- */
+async function getInvoiceById(invoiceId) {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/v2/invoicing/invoices/${invoiceId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '?');
+    throw new Error('getInvoiceById failed: ' + txt);
+  }
+  return res.json();
+}
+
 /* ---------------- Webhook verification ---------------- */
 async function verifyWebhookSignature(req) {
   const token = await getAccessToken();
@@ -256,4 +266,5 @@ async function verifyWebhookSignature(req) {
 module.exports = {
   createAndShareInvoice,
   verifyWebhookSignature,
+  getInvoiceById,
 };
