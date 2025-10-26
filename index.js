@@ -37,7 +37,11 @@ const GAG_LINK = process.env.GAG_LINK || '';
 const runtimeInvoiceMap = new Map(); // invoiceId => channelId
 const rememberInvoiceChannel = (invoiceId, channelId) => {
   runtimeInvoiceMap.set(invoiceId, channelId);
-  setTimeout(() => runtimeInvoiceMap.delete(invoiceId), 7 * 24 * 60 * 60 * 1000);
+  console.log('[map] remember', invoiceId, '→', channelId, '(size:', runtimeInvoiceMap.size, ')');
+  setTimeout(() => {
+    runtimeInvoiceMap.delete(invoiceId);
+    console.log('[map] expired', invoiceId, '(size:', runtimeInvoiceMap.size, ')');
+  }, 7 * 24 * 60 * 60 * 1000);
 };
 
 // ===== Bot ready =====
@@ -202,7 +206,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
     }
 
-    await interaction.deferReply(); // public reply in the channel where used
+    await interaction.deferReply();
 
     const itemName = interaction.options.getString('item');
     const howmuch  = interaction.options.getNumber('howmuch');
@@ -226,7 +230,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         reference
       });
 
-      // Save a local mapping in case the webhook doesn’t return the reference.
       rememberInvoiceChannel(id, interaction.channelId);
 
       const row = new ActionRowBuilder().addComponents(
@@ -258,11 +261,9 @@ app.post('/paypal/webhook', async (req, res) => {
     const ev = req.body;
     console.log('[webhook] event:', ev?.event_type);
 
-    // Signature verification
     const ok = await verifyWebhookSignature(req);
     console.log('[webhook] verification:', ok ? '✅ passed' : '❌ failed');
 
-    // Always respond 200 to PayPal; ignore if not verified
     res.status(200).end();
     if (!ok) return;
 
@@ -278,12 +279,16 @@ app.post('/paypal/webhook', async (req, res) => {
           ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
           : null;
 
-      // --- Try to discover the original channel from the webhook payload ---
       let channelFromRef = null;
+
+      // 1) Try reference from the webhook event
       let refRaw =
         ev?.resource?.detail?.reference ??
         ev?.resource?.detail?.invoice_number ??
         null;
+
+      console.log('[webhook] map size before:', runtimeInvoiceMap.size);
+      console.log('[webhook] invoiceId:', invoiceId);
       console.log('[webhook] refRaw (from event):', refRaw);
 
       if (typeof refRaw === 'string') {
@@ -297,17 +302,20 @@ app.post('/paypal/webhook', async (req, res) => {
         }
       }
 
-      // --- Try our in-memory map (from /invoice time) ---
+      // 2) Try in-memory map
       const channelFromMap =
         runtimeInvoiceMap.get((ev?.resource?.id || ev?.resource?.invoice_id || '').toString()) || null;
+      if (channelFromMap) {
+        console.log('[webhook] recovered channel from map:', channelFromMap);
+      }
 
-      // --- If still unknown, fetch the invoice now and read its detail.reference ---
-      if (!channelFromRef && !channelFromMap && invoiceId && invoiceId !== '(unknown)') {
+      // 3) ALWAYS try fetching the invoice if we still don't have channelFromRef
+      if (!channelFromRef && invoiceId && invoiceId !== '(unknown)') {
         try {
-          const full = await getInvoiceById(invoiceId);
-          const invRef = full?.detail?.reference || null;
-          const invNum = full?.detail?.invoice_number || null;
-          console.log('[webhook] fetched invoice, reference:', invRef, 'invoice_number:', invNum);
+          const inv = await getInvoiceById(invoiceId);
+          const invRef = inv?.detail?.reference || null;
+          const invNum = inv?.detail?.invoice_number || null;
+          console.log('[webhook] fetched invoice; reference:', invRef, 'invoice_number:', invNum);
 
           if (typeof invRef === 'string') {
             try {
@@ -324,11 +332,10 @@ app.post('/paypal/webhook', async (req, res) => {
         }
       }
 
-      // --- Decide where to notify: ORIGINAL TICKET + PAID/STAFF ---
-      const primaryChannelId = channelFromRef || channelFromMap || null;
+      // Notify both: original ticket (from ref / fetched) + staff fallback
       const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
+      const notifyIds = [...new Set([channelFromRef, channelFromMap, fallbackChannelId].filter(Boolean))];
 
-      const notifyIds = [...new Set([primaryChannelId, fallbackChannelId].filter(Boolean))];
       console.log('[webhook] notifying channels:', notifyIds);
 
       if (notifyIds.length === 0) {
@@ -363,7 +370,6 @@ app.post('/paypal/webhook', async (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log('[webhook] listening on port', PORT));
 
-// ===== Error handlers & login =====
 process.on('unhandledRejection', (err) => console.error('[global] Unhandled Rejection:', err));
 process.on('uncaughtException', (err) => console.error('[global] Uncaught Exception:', err));
 client.on('error', (err) => console.error('[client] error:', err));
