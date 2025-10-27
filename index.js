@@ -7,7 +7,6 @@ const {
   ButtonBuilder,
   ButtonStyle,
   Events,
-  MessageFlags,
 } = require('discord.js');
 
 const express = require('express');
@@ -117,7 +116,11 @@ client.on('messageCreate', async (message) => {
 
   if (attachmentFile) embed.setImage(`attachment://${attachmentFile.name}`);
 
-  const proofsChannel = message.guild.channels.cache.get(PROOFS_CHANNEL_ID);
+  // Fetch from cache, then fallback to API fetch
+  const proofsChannel =
+    message.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
+    (await message.guild.channels.fetch(PROOFS_CHANNEL_ID).catch(() => null));
+
   if (!proofsChannel) return message.reply('⚠️ Could not find the proofs channel.');
 
   const content =
@@ -143,13 +146,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // /ping
   if (interaction.commandName === 'ping') {
-    return interaction.reply({ content: 'pong', flags: MessageFlags.Ephemeral });
+    return interaction.reply({ content: 'pong', ephemeral: true });
   }
 
   // /completeorder
   if (interaction.commandName === 'completeorder') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
     }
 
     const buyer = interaction.options.getUser('buyer');
@@ -161,12 +164,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setTitle('Purchase Confirmed! 🎉')
       .addFields({ name: 'Buyer', value: `<@${buyer.id}>`, inline: true }, { name: 'Item(s)', value: item })
       .setFooter({ text: 'Thanks for buying! – ysl' })
-      .setTimestamp()
-      .setImage(proofAttachment.url);
+      .setTimestamp();
 
-    const proofsChannel = interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID);
+    if (proofAttachment?.url) embed.setImage(proofAttachment.url);
+
+    const proofsChannel =
+      interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
+      (await interaction.guild.channels.fetch(PROOFS_CHANNEL_ID).catch(() => null));
+
     if (!proofsChannel) {
-      return interaction.reply({ content: '⚠️ Could not find the proofs channel.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '⚠️ Could not find the proofs channel.', ephemeral: true });
     }
 
     const content =
@@ -174,16 +181,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       `## We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}`;
 
     await proofsChannel.send({ content, embeds: [embed] });
-    return interaction.reply({ content: '✅ Posted your proof in #proofs.', flags: MessageFlags.Ephemeral });
+    return interaction.reply({ content: '✅ Posted your proof in #proofs.', ephemeral: true });
   }
 
   // /pvbserver
   if (interaction.commandName === 'pvbserver') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
     }
     if (!PVB_LINK) {
-      return interaction.reply({ content: '⚠️ The private server link is not set (PVB_LINK).', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '⚠️ The private server link is not set (PVB_LINK).', ephemeral: true });
     }
 
     const embed = new EmbedBuilder()
@@ -202,10 +209,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // /gagserver
   if (interaction.commandName === 'gagserver') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
     }
     if (!GAG_LINK) {
-      return interaction.reply({ content: '⚠️ The GAG private server link is not set (GAG_LINK).', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '⚠️ The GAG private server link is not set (GAG_LINK).', ephemeral: true });
     }
 
     const embed = new EmbedBuilder()
@@ -224,15 +231,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // /invoice (USD)
   if (interaction.commandName === 'invoice') {
     if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
     }
 
     await interaction.deferReply();
 
     const itemName = interaction.options.getString('item');
     const howmuch = interaction.options.getNumber('howmuch');
-    if (howmuch <= 0) {
-      return interaction.editReply('⚠️ Amount must be greater than 0.');
+
+    if (typeof howmuch !== 'number' || !Number.isFinite(howmuch) || howmuch <= 0) {
+      return interaction.editReply('⚠️ Amount must be a positive number.');
     }
 
     const amountUSD = howmuch.toFixed(2);
@@ -257,8 +265,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
       );
 
+      // ⬇️ No PayPal ID shown — clean message
       await interaction.editReply({
-        content: `Invoice **${id}** for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
+        content: `Invoice for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
         components: [row],
       });
     } catch (e) {
@@ -370,9 +379,10 @@ app.post('/paypal/webhook', async (req, res) => {
         return;
       }
 
+      // ⬇️ Clean “Paid” message without exposing the PayPal ID
       const msg = amount
-        ? `✅ **Paid** — Invoice \`${invoiceId}\` has been paid (**${amount}**).`
-        : `✅ **Paid** — Invoice \`${invoiceId}\` has been paid.`;
+        ? `✅ **Paid** — Invoice has been paid (**${amount}**).`
+        : `✅ **Paid** — Invoice has been paid.`;
 
       for (const id of notifyIds) {
         try {
