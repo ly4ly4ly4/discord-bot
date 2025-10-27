@@ -34,9 +34,7 @@ const PVB_LINK = process.env.PVB_LINK || '';
 const GAG_LINK = process.env.GAG_LINK || '';
 
 // ===== In-memory invoice memory =====
-// 1) Strong map by invoiceId -> channelId (when webhook gives us the ID).
 const runtimeInvoiceMap = new Map(); // key: invoiceId, val: channelId
-// 2) Recent queue for best-effort fallback when webhook omits invoiceId/reference.
 const recentInvoices = []; // [{ id, channelId, ts }]
 const RECENT_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
 
@@ -48,22 +46,12 @@ function pruneRecent() {
 }
 
 function rememberInvoiceChannel(invoiceId, channelId) {
-  // Map by id (fast path)
   runtimeInvoiceMap.set(invoiceId, channelId);
-
-  // Keep a recent list (fallback)
   recentInvoices.push({ id: invoiceId, channelId, ts: Date.now() });
   pruneRecent();
 
-  console.log(
-    '[map] remember',
-    invoiceId,
-    '→',
-    channelId,
-    `(map size: ${runtimeInvoiceMap.size}, recent: ${recentInvoices.length})`
-  );
+  console.log('[map] remember', invoiceId, '→', channelId, `(map size: ${runtimeInvoiceMap.size}, recent: ${recentInvoices.length})`);
 
-  // Auto-expire strong map entries in 7 days
   setTimeout(() => {
     runtimeInvoiceMap.delete(invoiceId);
     console.log('[map] expired', invoiceId, `(map size: ${runtimeInvoiceMap.size})`);
@@ -116,7 +104,6 @@ client.on('messageCreate', async (message) => {
 
   if (attachmentFile) embed.setImage(`attachment://${attachmentFile.name}`);
 
-  // Fetch from cache, then fallback to API fetch
   const proofsChannel =
     message.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
     (await message.guild.channels.fetch(PROOFS_CHANNEL_ID).catch(() => null));
@@ -265,9 +252,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
       );
 
-      // ⬇️ No PayPal ID shown — clean message
+      // Show the friendly name the buyer will see on PayPal:
+      const displayName = `Digital Item - ${itemName}`;
+
       await interaction.editReply({
-        content: `Invoice for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
+        content: `Invoice for **${displayName}** (${amountUSD} USD). Share this link with the buyer:`,
         components: [row],
       });
     } catch (e) {
@@ -379,7 +368,7 @@ app.post('/paypal/webhook', async (req, res) => {
         return;
       }
 
-      // ⬇️ Clean “Paid” message without exposing the PayPal ID
+      // Clean “Paid” message (no PayPal ID)
       const msg = amount
         ? `✅ **Paid** — Invoice has been paid (**${amount}**).`
         : `✅ **Paid** — Invoice has been paid.`;

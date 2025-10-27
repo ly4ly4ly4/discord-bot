@@ -8,6 +8,11 @@ const BASE =
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ----- Fixed invoice description (can be overridden by env) -----
+const FIXED_DESC =
+  process.env.INVOICE_DESCRIPTION ||
+  'This is a custom digital service delivered electronically within 24 hours via direct message or agreed method. No physical item will be shipped. All sales are final and non-refundable once delivered. By paying, you confirm that you have received or will receive the service as agreed.';
+
 /* ---------------- OAuth ---------------- */
 async function getAccessToken() {
   const res = await fetch(`${BASE}/v1/oauth2/token`, {
@@ -108,7 +113,6 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const ch6  = channelId ? `c${String(channelId).slice(-6)}` : '';
   let invoiceNumber = `iv${ts36}${ch6}`;        // e.g., "ivlmn0pqrsc123456"
   invoiceNumber = invoiceNumber.slice(0, 24);   // PayPal limit is <25
-
   if (invoiceNumber.length < 3) invoiceNumber = `iv${ts36}`.slice(0, 24);
 
   const recipientEmail =
@@ -130,8 +134,9 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
         currency_code: 'USD',
         invoice_number: invoiceNumber,
         reference,
-        note: itemName,
-        terms_and_conditions: 'Digital goods. No shipping.',
+        // Use fixed policy text for clarity + protection
+        note: FIXED_DESC,
+        terms_and_conditions: FIXED_DESC,
       },
       invoicer: {
         name: {
@@ -143,7 +148,9 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
       items: [
         {
-          name: itemName,
+          // Force a friendly, consistent item name
+          name: `Digital Item - ${itemName}`,
+          description: FIXED_DESC,
           quantity: '1',
           unit_amount: { currency_code: 'USD', value: amountUSD },
         },
