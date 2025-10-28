@@ -216,7 +216,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await interaction.deferReply();
 
-    // We still accept the 'item' option for convenience/logging, but the PayPal invoice name is fixed.
+    // We still accept the 'item' option for clarity in the Discord message,
+    // but paypal.js will always set the PayPal item title to "Digital Item".
     const itemName = interaction.options.getString('item');
     const howmuch = interaction.options.getNumber('howmuch');
 
@@ -234,7 +235,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
 
       const { id, payLink } = await createAndShareInvoice({
-        itemName,     // ignored for the PayPal item title (we force "Digital Item")
+        itemName,     // passed for your display/logging; PayPal title stays "Digital Item"
         amountUSD,    // Always USD
         reference,
       });
@@ -246,9 +247,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
       );
 
-      // Always display "Digital Item" to match the invoice
+      // Show exactly what the user typed in the Discord message:
       await interaction.editReply({
-        content: `Invoice for **Digital Item** (${amountUSD} USD). Share this link with the buyer:`,
+        content: `Invoice for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
         components: [row],
       });
     } catch (e) {
