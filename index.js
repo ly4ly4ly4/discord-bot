@@ -40,18 +40,14 @@ const RECENT_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
 
 function pruneRecent() {
   const cutoff = Date.now() - RECENT_WINDOW_MS;
-  while (recentInvoices.length && recentInvoices[0].ts < cutoff) {
-    recentInvoices.shift();
-  }
+  while (recentInvoices.length && recentInvoices[0].ts < cutoff) recentInvoices.shift();
 }
 
 function rememberInvoiceChannel(invoiceId, channelId) {
   runtimeInvoiceMap.set(invoiceId, channelId);
   recentInvoices.push({ id: invoiceId, channelId, ts: Date.now() });
   pruneRecent();
-
   console.log('[map] remember', invoiceId, '→', channelId, `(map size: ${runtimeInvoiceMap.size}, recent: ${recentInvoices.length})`);
-
   setTimeout(() => {
     runtimeInvoiceMap.delete(invoiceId);
     console.log('[map] expired', invoiceId, `(map size: ${runtimeInvoiceMap.size})`);
@@ -63,7 +59,6 @@ client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log('RAILWAY_GIT_COMMIT_SHA:', process.env.RAILWAY_GIT_COMMIT_SHA || '(none)');
   console.log('RAILWAY_GIT_BRANCH:', process.env.RAILWAY_GIT_BRANCH || '(none)');
-
   try {
     const cmds = await client.application.commands.fetch();
     console.log('Loaded application commands:', [...cmds.values()].map(c => c.name).join(', ') || '(none)');
@@ -107,7 +102,6 @@ client.on('messageCreate', async (message) => {
   const proofsChannel =
     message.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
     (await message.guild.channels.fetch(PROOFS_CHANNEL_ID).catch(() => null));
-
   if (!proofsChannel) return message.reply('⚠️ Could not find the proofs channel.');
 
   const content =
@@ -158,7 +152,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const proofsChannel =
       interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
       (await interaction.guild.channels.fetch(PROOFS_CHANNEL_ID).catch(() => null));
-
     if (!proofsChannel) {
       return interaction.reply({ content: '⚠️ Could not find the proofs channel.', ephemeral: true });
     }
@@ -223,6 +216,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await interaction.deferReply();
 
+    // We still accept the 'item' option for convenience/logging, but the PayPal invoice name is fixed.
     const itemName = interaction.options.getString('item');
     const howmuch = interaction.options.getNumber('howmuch');
 
@@ -240,8 +234,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
 
       const { id, payLink } = await createAndShareInvoice({
-        itemName,
-        amountUSD, // Always USD
+        itemName,     // ignored for the PayPal item title (we force "Digital Item")
+        amountUSD,    // Always USD
         reference,
       });
 
@@ -252,11 +246,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
       );
 
-      // Show the friendly name the buyer will see on PayPal:
-      const displayName = `Digital Item - ${itemName}`;
-
+      // Always display "Digital Item" to match the invoice
       await interaction.editReply({
-        content: `Invoice for **${displayName}** (${amountUSD} USD). Share this link with the buyer:`,
+        content: `Invoice for **Digital Item** (${amountUSD} USD). Share this link with the buyer:`,
         components: [row],
       });
     } catch (e) {
@@ -360,7 +352,6 @@ app.post('/paypal/webhook', async (req, res) => {
 
       const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
       const notifyIds = [...new Set([channelFromRef, channelFromMap, channelFromRecent, fallbackChannelId].filter(Boolean))];
-
       console.log('[webhook] notifying channels:', notifyIds);
 
       if (notifyIds.length === 0) {
@@ -368,7 +359,6 @@ app.post('/paypal/webhook', async (req, res) => {
         return;
       }
 
-      // Clean “Paid” message (no PayPal ID)
       const msg = amount
         ? `✅ **Paid** — Invoice has been paid (**${amount}**).`
         : `✅ **Paid** — Invoice has been paid.`;

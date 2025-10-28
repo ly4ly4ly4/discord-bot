@@ -134,7 +134,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
         currency_code: 'USD',
         invoice_number: invoiceNumber,
         reference,
-        // Use fixed policy text for clarity + protection
+        // Fixed policy text for clarity + protection
         note: FIXED_DESC,
         terms_and_conditions: FIXED_DESC,
       },
@@ -148,8 +148,8 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
       items: [
         {
-          // Force a friendly, consistent item name
-          name: `Digital Item - ${itemName}`,
+          // Force a friendly, consistent item name (no suffix)
+          name: 'Digital Item',
           description: FIXED_DESC,
           quantity: '1',
           unit_amount: { currency_code: 'USD', value: amountUSD },
