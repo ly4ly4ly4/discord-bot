@@ -1,5 +1,5 @@
-// paypal.js — create invoice, return official short "pay" link (no send step)
-// Live-safe: DIGITAL_GOODS category, optional policy, no item.description.
+// paypal.js — create invoice, send-to-invoicer, return official short "pay" link
+// Live-safe: DIGITAL_GOODS category, optional policy, no item.description, no recipients.
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -83,7 +83,7 @@ function cleanText(s, max = 1000) {
   return flat.slice(0, max);
 }
 
-/* ---------------- Create + Share (poll for "pay" link) ---------------- */
+/* ---------------- Create + Send + Share ---------------- */
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
@@ -97,23 +97,18 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   let invoiceNumber = `iv${ts36}${ch6}`.slice(0, 24);
   if (invoiceNumber.length < 3) invoiceNumber = `iv${ts36}`.slice(0, 24);
 
-  const recipientEmail =
-    process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
-    process.env.SELLER_EMAIL ||
-    'placeholder@example.com';
-
-  // No default policy. If env is blank/undefined → no note/terms.
-  const ENV_DESC_RAW = process.env.INVOICE_DESCRIPTION; // could be undefined or empty string
+  // Optional policy
+  const ENV_DESC_RAW = process.env.INVOICE_DESCRIPTION; // undefined or empty ok
   const POLICY_TEXT = cleanText(ENV_DESC_RAW ?? '', 1000);
   const USE_POLICY = POLICY_TEXT.length > 0;
 
-  // Build payload
+  // Build payload — NO primary_recipients
   const payload = {
     detail: {
       currency_code: 'USD',
       invoice_number: invoiceNumber,
       reference,
-      category_code: 'DIGITAL_GOODS', // disables shipping UI
+      category_code: 'DIGITAL_GOODS', // hide shipping / mark digital
       ...(USE_POLICY ? { note: POLICY_TEXT, terms_and_conditions: POLICY_TEXT } : {}),
     },
     invoicer: {
@@ -123,11 +118,10 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       },
       email_address: process.env.SELLER_EMAIL || undefined,
     },
-    primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
+    // No primary_recipients: we will share/send-to-invoicer to publish the pay link
     items: [
       {
         name: 'Digital Item',
-        // Do not set item.description in Live — avoids 422s.
         quantity: '1',
         unit_amount: { currency_code: 'USD', value: amountUSD },
       },
@@ -170,7 +164,23 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }
   }
 
-  // ---- 2) Poll for the official short "pay" link ----
+  // ---- 2) Try SEND to publish the short "pay" link (to the invoicer only)
+  let canSend = true;
+  try {
+    const sendRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ send_to_invoicer: true }),
+    });
+    if (!sendRes.ok && sendRes.status !== 202) {
+      // 422 / REQUEST_REJECTED etc — we'll fall back to polling
+      canSend = false;
+    }
+  } catch {
+    canSend = false;
+  }
+
+  // ---- 3) Poll for the official short "pay" link
   async function fetchInvoice() {
     const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -180,26 +190,24 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   }
 
   let payLink = null;
-  // Try up to ~5 seconds with exponential-ish backoff
-  for (let i = 0; i < 12 && !payLink; i++) {
+  // Up to ~6s total with gentle backoff
+  for (let i = 0; i < 14 && !payLink; i++) {
     const current = await fetchInvoice();
     const links = current?.links || [];
-    // Prefer the short link:
     payLink =
+      // Prefer the SHORT link
       links.find((l) => l.rel === 'pay')?.href ||
-      // Fallback to any link that looks like the short format:
+      // Fallback: any link that matches short pattern
       links.find((l) => typeof l.href === 'string' && /\/invoice\/p\/#/.test(l.href))?.href ||
-      // Last fallback: long payer_view link (works but not pretty)
+      // Last fallback: payer_view (long)
       links.find((l) => l.rel === 'payer_view')?.href ||
       null;
 
-    if (!payLink) {
-      await sleep(250 + i * 350); // 250ms → ~4.1s total
-    }
+    if (!payLink) await sleep(250 + i * 375); // 250ms → ~5.5s
   }
 
   if (!payLink) {
-    // As a final guard, build the long link so the button is never empty
+    // Safety guard so your button is never empty
     payLink = `https://${process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com'}/invoice/payerView/details/${invoice.id}`;
   }
 
