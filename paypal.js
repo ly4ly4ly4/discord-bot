@@ -1,4 +1,4 @@
-// paypal.js — create invoice, return official payer_view link (no send step)
+// paypal.js — create invoice, return official short "pay" link (no send step)
 // Live-safe: DIGITAL_GOODS category, optional policy, no item.description.
 
 const BASE =
@@ -83,7 +83,7 @@ function cleanText(s, max = 1000) {
   return flat.slice(0, max);
 }
 
-/* ---------------- Create + Share (poll for payer_view link) ---------------- */
+/* ---------------- Create + Share (poll for "pay" link) ---------------- */
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
@@ -113,7 +113,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       currency_code: 'USD',
       invoice_number: invoiceNumber,
       reference,
-      category_code: 'DIGITAL_GOODS', // disable shipping UI
+      category_code: 'DIGITAL_GOODS', // disables shipping UI
       ...(USE_POLICY ? { note: POLICY_TEXT, terms_and_conditions: POLICY_TEXT } : {}),
     },
     invoicer: {
@@ -127,7 +127,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     items: [
       {
         name: 'Digital Item',
-      // Deliberately omit item.description for Live safety.
+        // Do not set item.description in Live — avoids 422s.
         quantity: '1',
         unit_amount: { currency_code: 'USD', value: amountUSD },
       },
@@ -170,7 +170,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }
   }
 
-  // ---- 2) Poll for official payer_view link (no /send call) ----
+  // ---- 2) Poll for the official short "pay" link ----
   async function fetchInvoice() {
     const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -179,22 +179,31 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     try { return await r.json(); } catch { return null; }
   }
 
-  let payerLink = null;
-  for (let i = 0; i < 6 && !payerLink; i++) {
+  let payLink = null;
+  // Try up to ~5 seconds with exponential-ish backoff
+  for (let i = 0; i < 12 && !payLink; i++) {
     const current = await fetchInvoice();
     const links = current?.links || [];
-    payerLink = links.find(l => l.rel === 'payer_view')?.href
-             || links.find(l => l.rel === 'pay')?.href
-             || null;
-    if (!payerLink) await sleep(350 + i * 150); // brief backoff: ~0.35s → ~1.1s
+    // Prefer the short link:
+    payLink =
+      links.find((l) => l.rel === 'pay')?.href ||
+      // Fallback to any link that looks like the short format:
+      links.find((l) => typeof l.href === 'string' && /\/invoice\/p\/#/.test(l.href))?.href ||
+      // Last fallback: long payer_view link (works but not pretty)
+      links.find((l) => l.rel === 'payer_view')?.href ||
+      null;
+
+    if (!payLink) {
+      await sleep(250 + i * 350); // 250ms → ~4.1s total
+    }
   }
 
-  if (!payerLink) {
-    // Last resort: construct, but note some accounts may require manual "Copy link" in UI first.
-    payerLink = `https://${process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com'}/invoice/payerView/details/${invoice.id}`;
+  if (!payLink) {
+    // As a final guard, build the long link so the button is never empty
+    payLink = `https://${process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com'}/invoice/payerView/details/${invoice.id}`;
   }
 
-  return { id: invoice.id, payLink: payerLink };
+  return { id: invoice.id, payLink };
 }
 
 /* ---------------- Fetch invoice by ID (for webhook recovery) ---------------- */
