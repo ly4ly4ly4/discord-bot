@@ -1,10 +1,15 @@
-// paypal.js — resilient create/search/send with retries + idempotency
-// Live-safe: policy text optional; no default; never sets item.description.
+// paypal.js — create invoice, return payer link (no send step)
+// Live-safe: DIGITAL_GOODS category, optional policy, no item.description.
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com';
+
+const PAYER_HOST =
+  process.env.PAYPAL_MODE === 'live'
+    ? 'https://www.paypal.com'
+    : 'https://www.sandbox.paypal.com';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -29,25 +34,6 @@ async function getAccessToken() {
   }
   const data = await res.json();
   return data.access_token;
-}
-
-/* ------------- Helper: payer link ------------- */
-function extractPayerLink(full, invoiceId) {
-  const links = full?.links || [];
-  let payLink =
-    links.find((l) => l.rel === 'payer_view')?.href ||
-    links.find((l) => l.rel === 'pay')?.href ||
-    full?.href ||
-    null;
-
-  if (!payLink) {
-    const host =
-      process.env.PAYPAL_MODE === 'live'
-        ? 'www.paypal.com'
-        : 'www.sandbox.paypal.com';
-    payLink = `https://${host}/invoice/payerView/details/${invoiceId}`;
-  }
-  return payLink;
 }
 
 /* ------------- Helper: search by invoice_number with retries ------------- */
@@ -102,7 +88,7 @@ function cleanText(s, max = 1000) {
   return flat.slice(0, max);
 }
 
-/* ---------------- Create + Send + Share ---------------- */
+/* ---------------- Create + Share (no send) ---------------- */
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
@@ -121,7 +107,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     process.env.SELLER_EMAIL ||
     'placeholder@example.com';
 
-  // IMPORTANT: no default policy. If env is blank/undefined → no note/terms/description.
+  // No default policy. If env is blank/undefined → no note/terms.
   const ENV_DESC_RAW = process.env.INVOICE_DESCRIPTION; // could be undefined or empty string
   const POLICY_TEXT = cleanText(ENV_DESC_RAW ?? '', 1000);
   const USE_POLICY = POLICY_TEXT.length > 0;
@@ -132,7 +118,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       currency_code: 'USD',
       invoice_number: invoiceNumber,
       reference,
-      category_code: 'DIGITAL_GOODS', // mark as digital to disable shipping UI
+      category_code: 'DIGITAL_GOODS', // disable shipping UI
       ...(USE_POLICY ? { note: POLICY_TEXT, terms_and_conditions: POLICY_TEXT } : {}),
     },
     invoicer: {
@@ -146,7 +132,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     items: [
       {
         name: 'Digital Item',
-        // Deliberately omit item.description for Live safety (prevents 422 rejections).
+        // Deliberately omit item.description for Live safety.
         quantity: '1',
         unit_amount: { currency_code: 'USD', value: amountUSD },
       },
@@ -189,43 +175,8 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }
   }
 
-  // ---- 2) Send if DRAFT ----
-  await sleep(300);
-  let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  let current = await getRes.json().catch(() => ({}));
-  let status = current?.status || 'UNKNOWN';
-
-  if (status === 'DRAFT') {
-    async function trySend() {
-      const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ send_to_invoicer: true }),
-      });
-      if (!r.ok) {
-        const body = await r.text().catch(() => '?');
-        return { ok: false, status: r.status, body };
-      }
-      return { ok: true };
-    }
-    let send = await trySend();
-    if (!send.ok && send.status === 404) {
-      await sleep(700);
-      send = await trySend();
-    }
-    if (!send.ok) throw new Error('Send invoice failed: ' + send.body);
-
-    // refresh
-    getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    current = await getRes.json().catch(() => ({}));
-  }
-
-  const payLink = extractPayerLink(current, invoice.id);
-  if (!payLink) throw new Error('Could not find payer link on invoice');
+  // ---- 2) Share: build payer link directly (no send step needed) ----
+  const payLink = `${PAYER_HOST}/invoice/payerView/details/${invoice.id}`;
 
   return { id: invoice.id, payLink };
 }
