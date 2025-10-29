@@ -1,5 +1,5 @@
 // paypal.js — resilient create/search/send with retries + idempotency
-// (fixed: invoice_number <= 25 chars)
+// Live-safe: policy text optional; no default; never sets item.description.
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -7,11 +7,6 @@ const BASE =
     : 'https://api-m.sandbox.paypal.com';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ----- Fixed invoice description (can be overridden by env) -----
-const FIXED_DESC =
-  process.env.INVOICE_DESCRIPTION ||
-  'This is a custom digital service delivered electronically within 24 hours via direct message or agreed method. No physical item will be shipped. All sales are final and non-refundable once delivered. By paying, you confirm that you have received or will receive the service as agreed.';
 
 /* ---------------- OAuth ---------------- */
 async function getAccessToken() {
@@ -72,7 +67,7 @@ async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
   };
 
   for (let i = attempt; i < 6; i++) {
-    const wait = 250 + i * 150; // 250..1000+ ms
+    const wait = 250 + i * 150;
     if (i > 0) await sleep(wait);
 
     let res = await fetch(`${BASE}/v2/invoicing/search-invoices`, {
@@ -100,6 +95,13 @@ async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
   return null;
 }
 
+/* ---- helper: sanitize & truncate plain text (for optional policy) ---- */
+function cleanText(s, max = 1000) {
+  if (typeof s !== 'string') return '';
+  const flat = s.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.slice(0, max);
+}
+
 /* ---------------- Create + Send + Share ---------------- */
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
@@ -108,17 +110,47 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   let channelId = null;
   try { channelId = JSON.parse(reference)?.channelId || null; } catch {}
 
-  // ==== SHORT, SAFE invoice_number (<= 24 chars) ====
-  const ts36 = Date.now().toString(36);         // ~8–9 chars
+  // Short, safe invoice_number (<= 24 chars)
+  const ts36 = Date.now().toString(36);
   const ch6  = channelId ? `c${String(channelId).slice(-6)}` : '';
-  let invoiceNumber = `iv${ts36}${ch6}`;        // e.g., "ivlmn0pqrsc123456"
-  invoiceNumber = invoiceNumber.slice(0, 24);   // PayPal limit is <25
+  let invoiceNumber = `iv${ts36}${ch6}`.slice(0, 24);
   if (invoiceNumber.length < 3) invoiceNumber = `iv${ts36}`.slice(0, 24);
 
   const recipientEmail =
     process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
     process.env.SELLER_EMAIL ||
     'placeholder@example.com';
+
+  // IMPORTANT: no default policy. If env is blank/undefined → no note/terms/description.
+  const ENV_DESC_RAW = process.env.INVOICE_DESCRIPTION; // could be undefined or empty string
+  const POLICY_TEXT = cleanText(ENV_DESC_RAW ?? '', 1000);
+  const USE_POLICY = POLICY_TEXT.length > 0;
+
+  // Build payload
+  const payload = {
+    detail: {
+      currency_code: 'USD',
+      invoice_number: invoiceNumber,
+      reference,
+      ...(USE_POLICY ? { note: POLICY_TEXT, terms_and_conditions: POLICY_TEXT } : {}),
+    },
+    invoicer: {
+      name: {
+        given_name: process.env.INVOICE_BRAND_NAME || 'Your',
+        surname: 'Shop',
+      },
+      email_address: process.env.SELLER_EMAIL || undefined,
+    },
+    primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
+    items: [
+      {
+        name: 'Digital Item',
+        // Deliberately omit item.description for Live safety (prevents 422 rejections).
+        quantity: '1',
+        unit_amount: { currency_code: 'USD', value: amountUSD },
+      },
+    ],
+  };
 
   // ---- 1) CREATE (with idempotency) ----
   const createRes = await fetch(`${BASE}/v2/invoicing/invoices`, {
@@ -129,33 +161,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       Prefer: 'return=representation',
       'PayPal-Request-Id': invoiceNumber, // idempotent key
     },
-    body: JSON.stringify({
-      detail: {
-        currency_code: 'USD',
-        invoice_number: invoiceNumber,
-        reference,
-        // Fixed policy text for clarity + protection
-        note: FIXED_DESC,
-        terms_and_conditions: FIXED_DESC,
-      },
-      invoicer: {
-        name: {
-          given_name: process.env.INVOICE_BRAND_NAME || 'Your',
-          surname: 'Shop',
-        },
-        email_address: process.env.SELLER_EMAIL || undefined,
-      },
-      primary_recipients: [{ billing_info: { email_address: recipientEmail } }],
-      items: [
-        {
-          // Force a friendly, consistent item name (no suffix)
-          name: 'Digital Item',
-          description: FIXED_DESC,
-          quantity: '1',
-          unit_amount: { currency_code: 'USD', value: amountUSD },
-        },
-      ],
-    }),
+    body: JSON.stringify(payload),
   });
 
   let invoice = null;
@@ -174,30 +180,22 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
 
   // Fallback: search (indexing delay)
   if (!invoice?.id) {
-    console.warn('[paypal] create returned no ID; searching by invoice_number…');
     const recoveredId = await searchInvoiceByNumber(token, invoiceNumber, 0);
     if (recoveredId) {
-      console.log('[paypal] recovered invoice id via search:', recoveredId);
       invoice = { id: recoveredId };
     } else {
-      console.warn('[paypal] create status:', createRes.status);
-      console.warn('[paypal] create body (truncated):', (createText || '').slice(0, 500));
+      throw new Error('Create invoice failed: ' + (createText || `${createRes.status}`));
     }
   }
 
-  if (!invoice?.id) throw new Error('Create invoice returned no id');
-  console.log('[paypal] created invoice id:', invoice.id);
-
-  // Read current status
+  // ---- 2) Send if DRAFT ----
   await sleep(300);
   let getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   let current = await getRes.json().catch(() => ({}));
   let status = current?.status || 'UNKNOWN';
-  console.log('[paypal] invoice status before send:', status);
 
-  // ---- 2) Send only when DRAFT ----
   if (status === 'DRAFT') {
     async function trySend() {
       const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
@@ -207,30 +205,24 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       });
       if (!r.ok) {
         const body = await r.text().catch(() => '?');
-        return { ok: false, body, status: r.status };
+        return { ok: false, status: r.status, body };
       }
       return { ok: true };
     }
-
     let send = await trySend();
     if (!send.ok && send.status === 404) {
-      console.warn('[paypal] send returned 404, retrying once…', send.body);
       await sleep(700);
       send = await trySend();
     }
     if (!send.ok) throw new Error('Send invoice failed: ' + send.body);
 
-    // Refresh after send
+    // refresh
     getRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     current = await getRes.json().catch(() => ({}));
-    status = current?.status || status;
-  } else {
-    console.log(`[paypal] invoice status is ${status}; skipping send.`);
   }
 
-  // ---- 3) Return payer link ----
   const payLink = extractPayerLink(current, invoice.id);
   if (!payLink) throw new Error('Could not find payer link on invoice');
 
