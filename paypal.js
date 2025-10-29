@@ -132,6 +132,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       currency_code: 'USD',
       invoice_number: invoiceNumber,
       reference,
+      category_code: 'DIGITAL_GOODS', // mark as digital to disable shipping UI
       ...(USE_POLICY ? { note: POLICY_TEXT, terms_and_conditions: POLICY_TEXT } : {}),
     },
     invoicer: {
