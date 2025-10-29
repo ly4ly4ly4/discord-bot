@@ -1,5 +1,5 @@
-// paypal.js — create invoice, send-to-invoicer, return official short "pay" link
-// Live-safe: DIGITAL_GOODS category, optional policy, no item.description, no recipients.
+// paypal.js — robust: create → send-to-invoicer → (fallback) add recipient & send → return short "pay" link
+// Digital-safe: DIGITAL_GOODS; no item.description; optional policy; verbose logs for debugging.
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
@@ -31,56 +31,30 @@ async function getAccessToken() {
   return data.access_token;
 }
 
-/* ------------- Helper: search by invoice_number with retries ------------- */
-async function searchInvoiceByNumber(token, invoiceNumber, attempt = 0) {
-  const narrow = {
-    invoice_number: invoiceNumber,
-    status: ['DRAFT', 'UNPAID'],
-    page: 1,
-    page_size: 20,
-    total_required: false,
-  };
-  const broad = {
-    invoice_number: invoiceNumber,
-    page: 1,
-    page_size: 20,
-    total_required: false,
-  };
-
-  for (let i = attempt; i < 6; i++) {
-    const wait = 250 + i * 150;
-    if (i > 0) await sleep(wait);
-
-    let res = await fetch(`${BASE}/v2/invoicing/search-invoices`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(narrow),
-    });
-    let data = await res.json().catch(() => ({}));
-    let match = Array.isArray(data.items)
-      ? data.items.find((it) => it.detail?.invoice_number === invoiceNumber)
-      : null;
-    if (match?.id) return match.id;
-
-    res = await fetch(`${BASE}/v2/invoicing/search-invoices`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(broad),
-    });
-    data = await res.json().catch(() => ({}));
-    match = Array.isArray(data.items)
-      ? data.items.find((it) => it.detail?.invoice_number === invoiceNumber)
-      : null;
-    if (match?.id) return match.id;
-  }
-  return null;
-}
-
 /* ---- helper: sanitize & truncate plain text (for optional policy) ---- */
 function cleanText(s, max = 1000) {
   if (typeof s !== 'string') return '';
   const flat = s.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
   return flat.slice(0, max);
+}
+
+async function fetchInvoiceJSON(token, id) {
+  const r = await fetch(`${BASE}/v2/invoicing/invoices/${id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) return null;
+  try { return await r.json(); } catch { return null; }
+}
+
+function pickPayLink(inv) {
+  const links = inv?.links || [];
+  // Prefer the short link
+  let pay =
+    links.find((l) => l.rel === 'pay')?.href ||
+    links.find((l) => typeof l.href === 'string' && /\/invoice\/p\/#/.test(l.href))?.href ||
+    links.find((l) => l.rel === 'payer_view')?.href ||
+    null;
+  return pay;
 }
 
 /* ---------------- Create + Send + Share ---------------- */
@@ -102,7 +76,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const POLICY_TEXT = cleanText(ENV_DESC_RAW ?? '', 1000);
   const USE_POLICY = POLICY_TEXT.length > 0;
 
-  // Build payload — NO primary_recipients
+  // Build payload — NO primary_recipients initially
   const payload = {
     detail: {
       currency_code: 'USD',
@@ -118,7 +92,6 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       },
       email_address: process.env.SELLER_EMAIL || undefined,
     },
-    // No primary_recipients: we will share/send-to-invoicer to publish the pay link
     items: [
       {
         name: 'Digital Item',
@@ -142,9 +115,8 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
 
   let invoice = null;
   let createText = await createRes.text().catch(() => '');
-  if (createText && createText.trim()) {
-    try { invoice = JSON.parse(createText); } catch {}
-  }
+  if (createText && createText.trim()) { try { invoice = JSON.parse(createText); } catch {} }
+
   if (!invoice?.id) {
     const loc = createRes.headers.get('location') || createRes.headers.get('Location');
     if (loc) {
@@ -153,62 +125,95 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
       if (maybeId) invoice = { id: maybeId };
     }
   }
+  if (!invoice?.id) throw new Error('Create invoice failed: ' + (createText || `${createRes.status}`));
 
-  // Fallback: search (indexing delay)
-  if (!invoice?.id) {
-    const recoveredId = await searchInvoiceByNumber(token, invoiceNumber, 0);
-    if (recoveredId) {
-      invoice = { id: recoveredId };
-    } else {
-      throw new Error('Create invoice failed: ' + (createText || `${createRes.status}`));
-    }
-  }
+  console.log('[paypal] created invoice id:', invoice.id);
 
-  // ---- 2) Try SEND to publish the short "pay" link (to the invoicer only)
-  let canSend = true;
+  // ---- 2) Try SEND to invoicer (publishes share link on many accounts)
+  let sendOk = false;
   try {
     const sendRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ send_to_invoicer: true }),
     });
-    if (!sendRes.ok && sendRes.status !== 202) {
-      // 422 / REQUEST_REJECTED etc — we'll fall back to polling
-      canSend = false;
+    sendOk = sendRes.ok || sendRes.status === 202;
+    if (!sendOk) {
+      const t = await sendRes.text().catch(() => '?');
+      console.log('[paypal] send_to_invoicer rejected:', sendRes.status, t.slice(0, 500));
+    } else {
+      console.log('[paypal] send_to_invoicer accepted');
     }
-  } catch {
-    canSend = false;
+  } catch (e) {
+    console.log('[paypal] send_to_invoicer error:', e?.message || e);
   }
 
-  // ---- 3) Poll for the official short "pay" link
-  async function fetchInvoice() {
-    const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!r.ok) return null;
-    try { return await r.json(); } catch { return null; }
-  }
-
+  // ---- 3) Poll a few times for short "pay" link
   let payLink = null;
-  // Up to ~6s total with gentle backoff
-  for (let i = 0; i < 14 && !payLink; i++) {
-    const current = await fetchInvoice();
-    const links = current?.links || [];
-    payLink =
-      // Prefer the SHORT link
-      links.find((l) => l.rel === 'pay')?.href ||
-      // Fallback: any link that matches short pattern
-      links.find((l) => typeof l.href === 'string' && /\/invoice\/p\/#/.test(l.href))?.href ||
-      // Last fallback: payer_view (long)
-      links.find((l) => l.rel === 'payer_view')?.href ||
+  for (let i = 0; i < 10 && !payLink; i++) {
+    const current = await fetchInvoiceJSON(token, invoice.id);
+    if (current) {
+      console.log('[paypal] poll', i, 'status:', current?.status, 'links:', JSON.stringify(current?.links || [], null, 2));
+      payLink = pickPayLink(current);
+    }
+    if (!payLink) await sleep(300 + i * 250); // ~0.3s → ~2.7s
+  }
+
+  // ---- 4) Fallback: if no short link, add a recipient and send to recipient, then poll again
+  if (!payLink) {
+    const recipientEmail =
+      process.env.INVOICE_RECIPIENT_PLACEHOLDER ||
+      process.env.SELLER_EMAIL ||
       null;
 
-    if (!payLink) await sleep(250 + i * 375); // 250ms → ~5.5s
+    if (recipientEmail) {
+      // PATCH primary_recipients
+      try {
+        const patchRes = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify([
+            { op: 'replace', path: '/primary_recipients', value: [{ billing_info: { email_address: recipientEmail } }] }
+          ]),
+        });
+        console.log('[paypal] patch recipients status:', patchRes.status);
+      } catch (e) {
+        console.log('[paypal] patch recipients error:', e?.message || e);
+      }
+
+      // Send to recipient
+      try {
+        const sendRes2 = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}/send`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ send_to_invoicer: true, send_to_recipient: true }),
+        });
+        console.log('[paypal] send_to_recipient status:', sendRes2.status);
+      } catch (e) {
+        console.log('[paypal] send_to_recipient error:', e?.message || e);
+      }
+
+      // Poll again longer
+      for (let i = 0; i < 12 && !payLink; i++) {
+        const current = await fetchInvoiceJSON(token, invoice.id);
+        if (current) {
+          console.log('[paypal] poll+recipient', i, 'status:', current?.status, 'links:', JSON.stringify(current?.links || [], null, 2));
+          payLink = pickPayLink(current);
+        }
+        if (!payLink) await sleep(350 + i * 350); // up to ~5s
+      }
+    } else {
+      console.log('[paypal] no recipient email available for fallback send');
+    }
   }
 
+  // Final fallback so your button is never empty (may 404 if PayPal hasn’t published yet)
   if (!payLink) {
-    // Safety guard so your button is never empty
-    payLink = `https://${process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com'}/invoice/payerView/details/${invoice.id}`;
+    const host = process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com';
+    payLink = `https://${host}/invoice/payerView/details/${invoice.id}`;
+    console.log('[paypal] returning long payerView fallback:', payLink);
+  } else {
+    console.log('[paypal] returning pay link:', payLink);
   }
 
   return { id: invoice.id, payLink };
