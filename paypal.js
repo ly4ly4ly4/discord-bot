@@ -1,15 +1,10 @@
-// paypal.js — create invoice, return payer link (no send step)
+// paypal.js — create invoice, return official payer_view link (no send step)
 // Live-safe: DIGITAL_GOODS category, optional policy, no item.description.
 
 const BASE =
   process.env.PAYPAL_MODE === 'live'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com';
-
-const PAYER_HOST =
-  process.env.PAYPAL_MODE === 'live'
-    ? 'https://www.paypal.com'
-    : 'https://www.sandbox.paypal.com';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,7 +83,7 @@ function cleanText(s, max = 1000) {
   return flat.slice(0, max);
 }
 
-/* ---------------- Create + Share (no send) ---------------- */
+/* ---------------- Create + Share (poll for payer_view link) ---------------- */
 async function createAndShareInvoice({ itemName, amountUSD, reference }) {
   const token = await getAccessToken();
 
@@ -132,7 +127,7 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     items: [
       {
         name: 'Digital Item',
-        // Deliberately omit item.description for Live safety.
+      // Deliberately omit item.description for Live safety.
         quantity: '1',
         unit_amount: { currency_code: 'USD', value: amountUSD },
       },
@@ -175,10 +170,31 @@ async function createAndShareInvoice({ itemName, amountUSD, reference }) {
     }
   }
 
-  // ---- 2) Share: build payer link directly (no send step needed) ----
-  const payLink = `${PAYER_HOST}/invoice/payerView/details/${invoice.id}`;
+  // ---- 2) Poll for official payer_view link (no /send call) ----
+  async function fetchInvoice() {
+    const r = await fetch(`${BASE}/v2/invoicing/invoices/${invoice.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return null;
+    try { return await r.json(); } catch { return null; }
+  }
 
-  return { id: invoice.id, payLink };
+  let payerLink = null;
+  for (let i = 0; i < 6 && !payerLink; i++) {
+    const current = await fetchInvoice();
+    const links = current?.links || [];
+    payerLink = links.find(l => l.rel === 'payer_view')?.href
+             || links.find(l => l.rel === 'pay')?.href
+             || null;
+    if (!payerLink) await sleep(350 + i * 150); // brief backoff: ~0.35s → ~1.1s
+  }
+
+  if (!payerLink) {
+    // Last resort: construct, but note some accounts may require manual "Copy link" in UI first.
+    payerLink = `https://${process.env.PAYPAL_MODE === 'live' ? 'www.paypal.com' : 'www.sandbox.paypal.com'}/invoice/payerView/details/${invoice.id}`;
+  }
+
+  return { id: invoice.id, payLink: payerLink };
 }
 
 /* ---------------- Fetch invoice by ID (for webhook recovery) ---------------- */
