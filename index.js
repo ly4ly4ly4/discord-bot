@@ -1,4 +1,4 @@
-// index.js — posts PAID to staff channel AND the ticket where /invoice was used
+// index.js — proofs + utility commands (NO PayPal / NO invoices)
 const {
   Client,
   GatewayIntentBits,
@@ -9,13 +9,6 @@ const {
   Events,
 } = require('discord.js');
 
-const express = require('express');
-const {
-  createAndShareInvoice,
-  verifyWebhookSignature,
-  getInvoiceById,
-} = require('./paypal');
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
@@ -23,7 +16,6 @@ const client = new Client({
 // ===== Config =====
 const ALLOWED_USERS = ['1116953633364398101', '456358634868441088'];
 const PROOFS_CHANNEL_ID = '1406121226367275008';
-const PAID_CHANNEL_ID = process.env.PAID_CHANNEL_ID || null;
 
 // Emojis
 const EMOJI_THANKYOU = '<:heartssss:1410132419524169889>';
@@ -32,27 +24,6 @@ const EMOJI_VOUCH = '<:Cart:1421198487684648970>';
 // Roblox links (optional)
 const PVB_LINK = process.env.PVB_LINK || '';
 const GAG_LINK = process.env.GAG_LINK || '';
-
-// ===== In-memory invoice memory =====
-const runtimeInvoiceMap = new Map(); // key: invoiceId, val: channelId
-const recentInvoices = []; // [{ id, channelId, ts }]
-const RECENT_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
-
-function pruneRecent() {
-  const cutoff = Date.now() - RECENT_WINDOW_MS;
-  while (recentInvoices.length && recentInvoices[0].ts < cutoff) recentInvoices.shift();
-}
-
-function rememberInvoiceChannel(invoiceId, channelId) {
-  runtimeInvoiceMap.set(invoiceId, channelId);
-  recentInvoices.push({ id: invoiceId, channelId, ts: Date.now() });
-  pruneRecent();
-  console.log('[map] remember', invoiceId, '→', channelId, `(map size: ${runtimeInvoiceMap.size}, recent: ${recentInvoices.length})`);
-  setTimeout(() => {
-    runtimeInvoiceMap.delete(invoiceId);
-    console.log('[map] expired', invoiceId, `(map size: ${runtimeInvoiceMap.size})`);
-  }, 7 * 24 * 60 * 60 * 1000);
-}
 
 // ===== Bot ready =====
 client.once('ready', async () => {
@@ -147,8 +118,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: 'Thanks for buying! – ysl' })
       .setTimestamp();
 
-    // ✅ FIX: upload the proof as a FILE so it doesn't expire later
-    // (embedding proofAttachment.url directly will eventually break)
+    // ✅ Permanent proof: upload as a file + use attachment:// in embed
     let files = [];
     if (proofAttachment?.url) {
       const filename = proofAttachment.name || 'proof.png';
@@ -214,185 +184,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     return interaction.reply({ embeds: [embed], components: [row] });
   }
-
-  // /invoice (USD)
-  if (interaction.commandName === 'invoice') {
-    if (!ALLOWED_USERS.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
-    }
-
-    await interaction.deferReply();
-
-    // We still accept the 'item' option for clarity in the Discord message,
-    // but paypal.js will always set the PayPal item title to "Digital Item".
-    const itemName = interaction.options.getString('item');
-    const howmuch = interaction.options.getNumber('howmuch');
-
-    if (typeof howmuch !== 'number' || !Number.isFinite(howmuch) || howmuch <= 0) {
-      return interaction.editReply('⚠️ Amount must be a positive number.');
-    }
-
-    const amountUSD = howmuch.toFixed(2);
-
-    try {
-      const reference = JSON.stringify({
-        guildId: interaction.guildId,
-        channelId: interaction.channelId, // the ticket/channel
-        invokerId: interaction.user.id,
-      });
-
-      const { id, payLink } = await createAndShareInvoice({
-        itemName,     // passed for your display/logging; PayPal title stays "Digital Item"
-        amountUSD,    // Always USD
-        reference,
-      });
-
-      // Remember both ways: strong map + recent queue
-      rememberInvoiceChannel(id, interaction.channelId);
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('Pay Invoice').setStyle(ButtonStyle.Link).setURL(payLink)
-      );
-
-      // Show exactly what the user typed in the Discord message:
-      await interaction.editReply({
-        content: `Invoice for **${itemName}** (${amountUSD} USD). Share this link with the buyer:`,
-        components: [row],
-      });
-    } catch (e) {
-      console.error('[invoice] error:', e);
-      await interaction.editReply('⚠️ Could not create/send the invoice. Check PayPal env vars & Railway logs.');
-    }
-    return;
-  }
 });
-
-// ===== HTTP SERVER (PayPal Webhook) =====
-const app = express();
-app.use(express.json({ type: '*/*' })); // accept JSON
-
-// optional health
-app.get('/', (_req, res) => res.send('OK'));
-
-// ==== Post in original ticket + fallback channel ====
-app.post('/paypal/webhook', async (req, res) => {
-  try {
-    const ev = req.body;
-    console.log('[webhook] event:', ev?.event_type);
-
-    const ok = await verifyWebhookSignature(req);
-    console.log('[webhook] verification:', ok ? '✅ passed' : '❌ failed');
-    res.status(200).end();
-    if (!ok) return;
-
-    if (ev?.event_type === 'INVOICING.INVOICE.PAID') {
-      const invoiceId =
-        ev?.resource?.id ||
-        ev?.resource?.invoice_id ||
-        ev?.resource?.detail?.invoice_number ||
-        '(unknown)';
-
-      const amount =
-        ev?.resource?.amount?.value && ev?.resource?.amount?.currency_code
-          ? `${ev.resource.amount.value} ${ev.resource.amount.currency_code}`
-          : null;
-
-      console.log('[webhook] invoiceId resolved:', invoiceId);
-      console.log('[webhook] map size before:', runtimeInvoiceMap.size);
-
-      // 1) Try reference from the webhook event
-      let channelFromRef = null;
-      let refRaw =
-        ev?.resource?.detail?.reference ??
-        ev?.resource?.detail?.invoice_number ??
-        null;
-      console.log('[webhook] refRaw (from event):', refRaw);
-
-      if (typeof refRaw === 'string') {
-        try {
-          const parsed = JSON.parse(refRaw);
-          if (parsed?.channelId) channelFromRef = parsed.channelId;
-        } catch {}
-        if (!channelFromRef) {
-          const m = refRaw.match(/ch_(\d{17,20})/);
-          if (m) channelFromRef = m[1];
-        }
-      }
-
-      // 2) Try in-memory map (strong reference)
-      const channelFromMap =
-        runtimeInvoiceMap.get((ev?.resource?.id || ev?.resource?.invoice_id || '').toString()) || null;
-      if (channelFromMap) console.log('[webhook] recovered channel from map:', channelFromMap);
-
-      // 3) Try fetching the invoice for its stored reference
-      if (!channelFromRef && invoiceId && invoiceId !== '(unknown)') {
-        try {
-          const inv = await getInvoiceById(invoiceId);
-          const invRef = inv?.detail?.reference || null;
-          const invNum = inv?.detail?.invoice_number || null;
-          console.log('[webhook] fetched invoice; reference:', invRef, 'invoice_number:', invNum);
-
-          if (typeof invRef === 'string') {
-            try {
-              const parsed = JSON.parse(invRef);
-              if (parsed?.channelId) channelFromRef = parsed.channelId;
-            } catch {}
-          }
-          if (!channelFromRef && typeof invNum === 'string') {
-            const m = invNum.match(/ch_(\d{17,20})/);
-            if (m) channelFromRef = m[1];
-          }
-        } catch (e) {
-          console.log('[webhook] getInvoiceById failed:', e?.message || e);
-        }
-      }
-
-      // 4) FINAL fallback: most recent invoice issued in the last 20 minutes
-      let channelFromRecent = null;
-      if (!channelFromRef && !channelFromMap) {
-        pruneRecent();
-        if (recentInvoices.length) {
-          const last = recentInvoices[recentInvoices.length - 1];
-          channelFromRecent = last?.channelId || null;
-          console.log('[webhook] using recent fallback channel:', channelFromRecent);
-        }
-      }
-
-      const fallbackChannelId = PAID_CHANNEL_ID || PROOFS_CHANNEL_ID || null;
-      const notifyIds = [...new Set([channelFromRef, channelFromMap, channelFromRecent, fallbackChannelId].filter(Boolean))];
-      console.log('[webhook] notifying channels:', notifyIds);
-
-      if (notifyIds.length === 0) {
-        console.log('[webhook] no channels available; set PAID_CHANNEL_ID or PROOFS_CHANNEL_ID');
-        return;
-      }
-
-      const msg = amount
-        ? `✅ **Paid** — Invoice has been paid (**${amount}**).`
-        : `✅ **Paid** — Invoice has been paid.`;
-
-      for (const id of notifyIds) {
-        try {
-          const ch = client.channels.cache.get(id) || (await client.channels.fetch(id));
-          if (ch) {
-            await ch.send(msg);
-            console.log('[webhook] posted confirmation in channel', id);
-          } else {
-            console.log('[webhook] channel not found', id);
-          }
-        } catch (e) {
-          console.log('[webhook] send error for channel', id, e?.message || e);
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[webhook] handler error:', err);
-    try { res.status(200).end(); } catch {}
-  }
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log('[webhook] listening on port', PORT));
 
 // ===== Error handlers & login =====
 process.on('unhandledRejection', (err) => console.error('[global] Unhandled Rejection:', err));
