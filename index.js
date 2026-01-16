@@ -147,7 +147,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: 'Thanks for buying! – ysl' })
       .setTimestamp();
 
-    if (proofAttachment?.url) embed.setImage(proofAttachment.url);
+    // ✅ FIX: upload the proof as a FILE so it doesn't expire later
+    // (embedding proofAttachment.url directly will eventually break)
+    let files = [];
+    if (proofAttachment?.url) {
+      const filename = proofAttachment.name || 'proof.png';
+      files = [{ attachment: proofAttachment.url, name: filename }];
+      embed.setImage(`attachment://${filename}`);
+    }
 
     const proofsChannel =
       interaction.guild.channels.cache.get(PROOFS_CHANNEL_ID) ||
@@ -160,7 +167,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       `## Thank you for your purchase <@${buyer.id}> ${EMOJI_THANKYOU}\n` +
       `## We hope you’re happy with your purchase! Please leave us a vouch. ${EMOJI_VOUCH}`;
 
-    await proofsChannel.send({ content, embeds: [embed] });
+    await proofsChannel.send({ content, embeds: [embed], files });
     return interaction.reply({ content: '✅ Posted your proof in #proofs.', ephemeral: true });
   }
 
